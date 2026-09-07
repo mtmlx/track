@@ -1,0 +1,26 @@
+{
+  "version": "0.2",
+  "phases": {
+    "pre_build": {
+      "commands": [
+        "aws ecr get-login-password --region \"$AWS_DEFAULT_REGION\" | docker login --username AWS --password-stdin \"$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com\"",
+        "REPOSITORY_URI=\"$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/track-trace\""
+      ]
+    },
+    "build": {
+      "commands": [
+        "docker build -t \"$REPOSITORY_URI:$IMAGE_TAG\" .",
+        "docker run --rm --user root --entrypoint sh -v \"$CODEBUILD_SRC_DIR:/validation:ro\" -v \"$CODEBUILD_SRC_DIR/deploy/aws-ecs/release/container-test.sh:/container-test.sh:ro\" \"$REPOSITORY_URI:$IMAGE_TAG\" /container-test.sh",
+        "docker run --rm --entrypoint python \"$REPOSITORY_URI:$IMAGE_TAG\" -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); page=b.new_page(); page.set_content('\"'\"'<title>Track smoke</title>'\"'\"'); assert page.title() == '\"'\"'Track smoke'\"'\"'; b.close(); p.stop(); print('\"'\"'Chromium smoke passed'\"'\"')'",
+        "python3 -m pip install --target /tmp/audit-deps pip-audit",
+        "PYTHONPATH=/tmp/audit-deps python3 -m pip_audit -r requirements.lock -r build-requirements.lock --disable-pip --no-deps -f json -o dependency-audit.json"
+      ]
+    },
+    "post_build": {
+      "commands": [
+        "test \"$CODEBUILD_BUILD_SUCCEEDING\" = \"1\"",
+        "docker push \"$REPOSITORY_URI:$IMAGE_TAG\""
+      ]
+    }
+  }
+}

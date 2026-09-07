@@ -14,6 +14,6 @@ Existing deployment target: AWS account 525753067477, us-east-2; ECS cluster tra
 
 CLICKUP_USE_TASK_STATUS=false in the example prevents native task-status changes only; it is not a global dry-run. A dry-run or guarded read-only pilot is required to prevent all operational writes.
 
-## Cloud development and source handoff
+## Automatic GitHub releases
 
-See [CLOUD_DEVELOPMENT.md](CLOUD_DEVELOPMENT.md). Codex cloud is authorized for `mtmlx/track`. CodeBuild currently consumes an S3 archive, not a GitHub webhook; merging a pull request does not deploy automatically. For a release, export the exact reviewed GitHub commit, upload it under a unique S3 source key, and start the existing CodeBuild project with that source location explicitly overridden. Never start the project against its default historical source archive. Retain the commit-to-image-digest evidence and complete the checks above before updating existing ECS task targets. No AWS configuration change is required for this manual source handoff.
+See [CLOUD_DEVELOPMENT.md](CLOUD_DEVELOPMENT.md). Once merged, `.github/workflows/deploy-track.yml` performs this build, validation and schedule-target promotion after approved changes reach main. It always overrides the existing CodeBuild source with the exact GitHub commit archive and preserves rollback evidence. Manual intervention is needed only for failed gates or recovery. Do not run a second manual deployment concurrently with the workflow.

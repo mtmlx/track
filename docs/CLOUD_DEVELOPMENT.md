@@ -16,13 +16,14 @@ Review the diff and checks. An independent approving review is required by prote
 
 ## Release to the existing ECS deployment
 
-The verified current setup uses CodeBuild `track-trace-image-build` in `us-east-2`, ECR `track-trace`, and ECS `track-trace-prod`. CodeBuild's configured source is an older S3 archive. GitHub currently has CodeQL and dependency-graph workflows, but no deployment workflow. A GitHub merge alone does not change AWS.
+The GitHub workflow `.github/workflows/deploy-track.yml` automatically releases pushes to protected `main`, including approved PR merges. It can also be manually rerun from main. Pull requests run the deployment recovery tests but cannot obtain AWS deployment credentials.
 
-Use an authorized release session with AWS access to:
+GitHub authenticates using short-lived OIDC credentials. The AWS trust policy requires repository ID `1180328188` and `refs/heads/main`; there are no stored AWS access keys in GitHub. The workflow uses the existing CodeBuild project, artifact bucket, ECR repository, ECS cluster and five worker schedules. It creates no ECS service and does not touch Lightsail.
 
-1. Fetch the exact merged GitHub commit and export that commit as a clean source archive, excluding local secrets and financial files. Record its full SHA.
-2. Upload the archive to a unique key under the existing build-artifact bucket and explicitly override CodeBuild's source location for this run. Do not reuse its default source archive.
-3. Build and test the production container; audit dependencies and scan the resulting image. Record the commit, CodeBuild run, and immutable ECR digest together.
-4. Follow [AWS_RELEASE.md](AWS_RELEASE.md): read-only pilot, rollback capture, and controlled updates to the existing ECS task revisions/schedule targets. Verify the result before proceeding to another carrier.
+The pipeline exports the exact commit, overrides CodeBuild's historical S3 source, runs the container test suite and Chromium smoke test, audits Python dependencies, and blocks on failed/incomplete image scans or critical/high findings. It then runs a read-only Maersk pilot. No eligible candidates, a timeout, or an unsuccessful pilot blocks deployment. Medium findings are retained in the evidence for review.
 
-This uses the existing AWS infrastructure; it neither migrates services nor returns to Lightsail. Deployment is manual and controlled today. A future GitHub Actions deployment would need narrowly scoped AWS authentication (prefer OIDC) and explicit release controls; that integration is not configured by this document.
+After these gates pass, the workflow snapshots all schedule settings, registers image-digest-pinned task revisions, updates the existing schedules, and verifies their settings. It attempts rollback on update failure without overwriting concurrent operator changes. Evidence is saved under `github-releases/<commit>-<run>-<attempt>/` in the existing S3 artifact bucket and as a GitHub Actions artifact. A failed rollback requires an operator to inspect `rollback-result.json` and restore the saved configuration.
+
+Success means the schedule targets were verified. Workers run at their existing times; a release does not immediately execute production writes or verify every carrier's eventual runtime result. Do not confuse this with an API deployment: no ECS API service was present in the verified cluster.
+
+Activation requires merging the workflow through the protected PR. The first main run must verify actual GitHub OIDC authentication and the complete AWS pipeline; those cannot be exercised from an untrusted review branch. Main protection and independent approval remain unchanged.
