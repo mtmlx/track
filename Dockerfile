@@ -41,6 +41,7 @@ RUN set -eux; \
     python3 -m venv /opt/track-venv && \
     python3 -m pip install --require-hashes -r /app/requirements.lock -r /app/build-requirements.lock && \
     python3 -m pip install --no-deps --no-build-isolation /app && \
+    apt-get purge -y python3.14-venv python3-pip-whl python3-setuptools-whl && \
     useradd --create-home --shell /usr/sbin/nologin appuser && \
     chown -R appuser:appuser /app && \
     chmod +x /app/scripts/run_sync.sh /app/scripts/run_sync_loop.sh
