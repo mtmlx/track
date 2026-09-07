@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 import json
 import os
 import re
@@ -572,6 +573,34 @@ def _parse_datetime_fallback(candidate: str) -> datetime | None:
     return None
 
 
+class _ScriptPayloadParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.scripts: list[tuple[bool, str]] = []
+        self._parts: list[str] | None = None
+        self._is_next = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            self._parts = []
+            self._is_next = any(name == "id" and (value or "").casefold() == "__next_data__" for name, value in attrs)
+
+    def handle_startendtag(self, tag, attrs):
+        # In text/html a script slash does not close its raw-text payload.
+        self.handle_starttag(tag, attrs)
+        if tag == "script":
+            self.set_cdata_mode(tag)
+
+    def handle_data(self, data):
+        if self._parts is not None:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self._parts is not None:
+            self.scripts.append((self._is_next, "".join(self._parts)))
+            self._parts = None
+
+
 def extract_json_from_http_response(response: requests.Response) -> dict:
     content_type = (response.headers.get("content-type") or "").lower()
     body = bounded_response_text(response)
@@ -581,19 +610,19 @@ def extract_json_from_http_response(response: requests.Response) -> dict:
             return data
         return {"data": data}
 
-    match = re.search(
-        r"<script[^>]*id=[\"']__NEXT_DATA__[\"'][^>]*>(.*?)</script>",
-        body,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if match:
-        data = json.loads(match.group(1))
+    parser = _ScriptPayloadParser()
+    parser.feed(body)
+    # Only complete script elements count. Do not flush incomplete markup:
+    # older supported HTMLParser versions rescan malformed suffixes at close.
+    next_payload = next((text for is_next, text in parser.scripts if is_next), None)
+    if next_payload is not None:
+        data = json.loads(next_payload)
         if isinstance(data, dict):
             return data
         return {"data": data}
 
-    for m in re.finditer(r"<script[^>]*>(.*?)</script>", body, re.DOTALL | re.IGNORECASE):
-        script_body = m.group(1).strip()
+    for _, text in parser.scripts:
+        script_body = text.strip()
         if not script_body:
             continue
         if not (script_body.startswith("{") or script_body.startswith("[")):

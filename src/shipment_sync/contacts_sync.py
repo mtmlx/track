@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .terminal import terminal_safe_text
+
 from dataclasses import dataclass
 import sys
 
@@ -29,7 +31,7 @@ def run_contacts_sync(
             f"| clickup_task={contact.task_id}"
         )
         if dry_run:
-            print(f"DRY RUN: {summary}")
+            print(terminal_safe_text(f"DRY RUN: {summary}"))
             skipped += 1
             continue
 
@@ -38,10 +40,10 @@ def run_contacts_sync(
                 raise RuntimeError("iCloud client is not configured")
             response = icloud_client.upsert_contact(contact)
             upserted += 1
-            print(f"UPSERTED ({response.status_code}): {summary}")
+            print(terminal_safe_text(f"UPSERTED ({response.status_code}): {summary}"))
         except Exception as exc:
             errors.append(f"{contact.task_id}: {exc}")
-            print(f"ERROR: {summary} -> {exc}", file=sys.stderr)
+            print(terminal_safe_text(f"ERROR: {summary} -> {exc}"), file=sys.stderr)
 
     return ContactSyncStats(
         total_candidates=len(contacts),
