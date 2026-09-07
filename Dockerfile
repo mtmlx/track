@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:v1.61.0-resolute@sha256:ac650e6fadc8d551a602031cb27a2d19b91c9eef14fbe250850c297e4aa9cd21
+FROM mcr.microsoft.com/playwright/python:v1.62.0-resolute@sha256:e0786fd1d24f9950d9fb6c36e713a04c5671bf79d0b36e2a94b31b5688c01fee
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -14,8 +14,6 @@ COPY src /app/src
 COPY scripts /app/scripts
 
 RUN set -eux; \
-    apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && \
     for package in \
         openssh-client \
         curl \
