@@ -14,6 +14,8 @@ COPY src /app/src
 COPY scripts /app/scripts
 
 RUN set -eux; \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && \
     for package in \
         openssh-client \
         curl \
