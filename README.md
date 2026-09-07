@@ -14,7 +14,7 @@ This project reads shipment references from ClickUp tasks, checks carrier tracki
 Compatibility links are kept at the root for `build/`, `output/`, and `website/` so older commands still resolve.
 
 Release history:
-- [`WHATS_NEW.md`](/Users/mario/Documents/New project/WHATS_NEW.md)
+- [`WHATS_NEW.md`](WHATS_NEW.md)
 
 ## What it does
 - Reads tasks from a ClickUp list
@@ -85,6 +85,29 @@ Trace only moves tasks forward through this sequence: `Pendiente de booking` ->
 `BK confirmado` -> `Recolectado` -> `En puerto Origen` -> `Tránsito` ->
 `Por arribar` -> `arribado en puerto` -> `en ruta a almacén` / `en almacén` ->
 `Vacío devuelto`.
+
+The cross-carrier operating contract, terminal conditions, source ownership,
+and DCSA adoption rules are defined in
+[`docs/TRACK_TRACE_OPERATIONAL_POLICY.md`](docs/TRACK_TRACE_OPERATIONAL_POLICY.md).
+
+## DCSA shadow pilot
+
+`dcsa-tnt-shadow` is a separate, non-projecting ingestion lane for official
+carrier DCSA payloads. It reads the existing ClickUp shipment inventory, calls
+only official CMA CGM or Maersk event APIs, validates and redacts payloads, and
+records evidence in an explicit ledger. It never writes a ClickUp field,
+status, or comment.
+
+Run a local configuration check only:
+```bash
+dcsa-tnt-shadow
+```
+
+The `--run` form makes external reads and writes validated evidence to the
+configured ledger; it is not a replacement for `shipment-sync` and does not
+activate any normal carrier schedule. See
+[`docs/DCSA_SHADOW_PILOT.md`](docs/DCSA_SHADOW_PILOT.md) for required
+environment variables, production infrastructure, and the go/no-go gates.
 
 The default status labels can be overridden with:
 `CLICKUP_STATUS_PENDING_BOOKING`, `CLICKUP_STATUS_BOOKING_CONFIRMED`,
@@ -225,8 +248,8 @@ open http://127.0.0.1:8000/docs
 ```
 
 Production deployment assets:
-- Render Blueprint: [`render.yaml`](/Users/mario/Documents/New project/render.yaml)
-- Track-and-Trace production runbook: [`docs/PRODUCTION_TRACK_TRACE.md`](/Users/mario/Documents/New project/docs/PRODUCTION_TRACK_TRACE.md)
+- Render Blueprint: [`render.yaml`](render.yaml)
+- Track-and-Trace production runbook: [`docs/PRODUCTION_TRACK_TRACE.md`](docs/PRODUCTION_TRACK_TRACE.md)
 
 ## ClickUp accounts payable invoice check
 This repo also includes a read-only accounts payable lookup for ClickUp so you can confirm whether invoice tasks are present in your AP list(s).
@@ -703,6 +726,13 @@ For MSC anti-bot resistant mode (recommended):
 - `MSC_PLAYWRIGHT_TRACKING_URL=https://www.msc.com/en/track-a-shipment`
 - `MSC_PLAYWRIGHT_API_ENDPOINT=https://www.msc.com/api/feature/tools/TrackingInfo`
 - Optional hard requirement: `MSC_PLAYWRIGHT_REQUIRED=true` (fail run if browser mode fails)
+- Operator-assisted alternative: `msc-browser-assisted --export-queue /tmp/msc-browser-queue.json`
+  creates a local review queue with normal MSC tracking URLs and exact references. After an operator copies a
+  complete MSC result page, `msc-browser-assisted --preview-capture /path/to/capture.txt --container CONTAINER`
+  produces the normal ClickUp update plan without writing anything. This lane does not automate browser access,
+  solve challenges, or run in ECS.
+- Carrier access denials open a per-run circuit breaker. Remaining shipments for that carrier are skipped and
+  the task exits failed, providing a clear ECS/CloudWatch failure signal instead of repeatedly querying a blocked site.
 For ONE website mode:
 - `ONE_TRACKING_URL_TEMPLATE=https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking`
 - Default query keys are already set for ONE:
@@ -769,6 +799,16 @@ For CMA-CGM:
       - `CMA_CGM_BOOKING_REF_PARAM=carrierBookingReference`
     - optional generic keys: `CMA_CGM_REF_PARAM`, `CMA_CGM_TYPE_PARAM`
     - `CMA_CGM_INCLUDE_TYPE_PARAM=true|false`
+  - DCSA cursor safety:
+    - `CMA_CGM_DCSA_MAX_PAGES=25` bounds official `Next-Page` traversal.
+  - Read-only legacy-versus-DCSA comparison:
+    - `CMA_CGM_COMPARISON_ENABLED=true`
+    - `CMA_CGM_COMPARISON_MAX_SHIPMENTS=25`
+    - `SHIPMENT_ALLOWED_LINES=cma cgm` is required and enforced as a strict
+      API-side ClickUp carrier prefilter.
+    - Run `cma-cgm-dcsa-compare --run`; it reads inventory and CMA's official
+      API but never writes ClickUp, creates a schedule, or replaces the normal
+      CMA worker.
 - Type codes:
   - `CMA_CGM_CONTAINER_TYPE_CODE=container`
   - `CMA_CGM_BOOKING_TYPE_CODE=booking`

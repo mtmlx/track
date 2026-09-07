@@ -78,7 +78,14 @@ class WanHaiAdapter(CarrierAdapter):
         for reference, cargo_type in attempts:
             for attempt in range(self.max_retries + 1):
                 try:
-                    return self._playwright_request(reference=reference, cargo_type=cargo_type)
+                    status = self._playwright_request(reference=reference, cargo_type=cargo_type)
+                    structured_booking = _normalize_reference(shipment.booking_no or "").upper()
+                    if cargo_type == "2" and reference.upper() != structured_booking:
+                        expected = set(extract_container_numbers(shipment.container_no or ""))
+                        actual = set(extract_container_numbers(status.discovered_containers))
+                        if not expected or not expected.issubset(actual):
+                            raise ValueError("Wan Hai comment reference does not match the task containers")
+                    return status
                 except WanHaiAntiBotBlocked:
                     raise
                 except Exception as exc:
@@ -193,13 +200,15 @@ def _build_reference_attempts(shipment: ShipmentRef) -> list[tuple[str, str]]:
         ref = _normalize_reference(shipment.booking_no)
         if ref:
             attempts.append((ref, "2"))
-    for hint in shipment.reference_hints:
-        ref = _normalize_reference(hint)
-        if ref:
-            attempts.append((ref, "2"))
     if shipment.container_no:
         for ref in _container_references(shipment.container_no):
             attempts.append((ref, "1"))
+    # Comments are suggestions only; a known container is required to bind results.
+    if extract_container_numbers(shipment.container_no or ""):
+        for hint in shipment.reference_hints:
+            ref = _normalize_reference(hint)
+            if ref:
+                attempts.append((ref, "2"))
     return _dedupe_reference_attempts(attempts)
 
 

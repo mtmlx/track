@@ -217,18 +217,9 @@ def _require_operator_auth(
     x_trigger_token: Annotated[str | None, Header()] = None,
     token: Annotated[str | None, Query()] = None,
 ) -> None:
-    from shipment_sync.api import _extract_presented_token
-    from shipment_sync.track_trace_config import ApiTriggerSettings
+    from shipment_sync.api import _require_operator_auth as require_operator_auth
 
-    load_dotenv()
-    expected = ApiTriggerSettings.from_env().trigger_token
-    if not expected:
-        return
-    provided = _extract_presented_token(authorization=authorization, x_trigger_token=x_trigger_token, query_token=token)
-    if not provided:
-        raise HTTPException(status_code=401, detail="Missing trigger authentication token")
-    if not secrets.compare_digest(provided, expected):
-        raise HTTPException(status_code=403, detail="Invalid trigger authentication token")
+    require_operator_auth(authorization=authorization, x_trigger_token=x_trigger_token, token=token)
 
 
 def _require_docuseal_webhook_token(

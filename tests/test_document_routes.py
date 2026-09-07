@@ -32,10 +32,10 @@ def _settings(**overrides: object) -> DocumentIntegrationSettings:
 
 
 def _client(settings: DocumentIntegrationSettings, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    monkeypatch.setenv("SHIPMENT_API_TRIGGER_TOKEN", "")
+    monkeypatch.setenv("SHIPMENT_API_TRIGGER_TOKEN", "test-operator-token")
     app = create_app()
     app.dependency_overrides[_get_document_settings] = lambda: settings
-    return TestClient(app)
+    return TestClient(app, headers={"X-Trigger-Token": "test-operator-token"})
 
 
 def test_nda_dry_run_builds_docuseal_submission_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,3 +162,35 @@ def test_docuseal_webhook_rejects_bad_token(monkeypatch: pytest.MonkeyPatch) -> 
     response = client.post("/api/webhooks/docuseal?token=wrong", json={"event_type": "form.completed"})
 
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize('route,body', [
+    ('/api/documents/nda', {
+        'dry_run': False,
+        'effective_date': '2026-09-07',
+        'counterparty': {'company_name': 'Test customer', 'company_address': 'Test address', 'company_tax_id': 'TEST'},
+        'counterparty_signer': {'name': 'Test signer', 'email': 'signer@example.test'},
+        'mtm_signer': {'name': 'Test operator', 'email': 'operator@example.test'},
+    }),
+    ('/api/webhooks/clickup/credit-contract', {
+        'dry_run': False, 'task_id': 'test-task', 'customer_company_name': 'Test customer',
+        'signer_name': 'Test signer', 'signer_email': 'signer@example.test',
+    }),
+])
+def test_document_issue_requires_auth_before_submission(monkeypatch, route, body):
+    from shipment_sync import document_routes
+    from types import SimpleNamespace
+    client = _client(_settings(), monkeypatch)
+    calls = []
+    monkeypatch.setattr(document_routes, '_get_docuseal_client', lambda settings: SimpleNamespace(
+        create_submission=lambda payload: calls.append(payload) or []
+    ))
+    monkeypatch.setenv('SHIPMENT_API_TRIGGER_TOKEN', '')
+    assert client.post(route, json=body).status_code == 503
+    assert calls == []
+    monkeypatch.setenv('SHIPMENT_API_TRIGGER_TOKEN', 'test-operator-token')
+    assert client.post(route, json=body, headers={'X-Trigger-Token': 'wrong'}).status_code == 403
+    assert calls == []
+    response = client.post(route, json=body)
+    assert response.status_code == 200, response.text
+    assert len(calls) == 1

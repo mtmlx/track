@@ -10,6 +10,9 @@ import requests
 
 from shipment_sync.carriers.base import CarrierAdapter
 from shipment_sync.carriers.common import (
+    bounded_response_json,
+    reject_response_redirect,
+    CarrierResponseLimitError,
     extract_container_numbers,
     extract_event_vessel_voyage,
     extract_event_state_hint,
@@ -131,9 +134,18 @@ class OneAdapter(CarrierAdapter):
         }
 
         try:
-            response = self.session.post(search_url, json=payload, timeout=self.timeout_seconds)
-            response.raise_for_status()
-            search_result = response.json()
+            response = self.session.post(
+                search_url, json=payload, timeout=self.timeout_seconds,
+                stream=True, allow_redirects=False,
+                hooks={"response": reject_response_redirect},
+            )
+            try:
+                response.raise_for_status()
+                search_result = bounded_response_json(response)
+            finally:
+                response.close()
+        except CarrierResponseLimitError:
+            raise
         except Exception:
             return None
 
@@ -253,9 +265,17 @@ class OneAdapter(CarrierAdapter):
                 url,
                 params={"booking_no": booking_no},
                 timeout=self.timeout_seconds,
+                stream=True,
+                allow_redirects=False,
+                hooks={"response": reject_response_redirect},
             )
-            response.raise_for_status()
-            payload = response.json()
+            try:
+                response.raise_for_status()
+                payload = bounded_response_json(response)
+            finally:
+                response.close()
+        except CarrierResponseLimitError:
+            raise
         except Exception:
             return []
 
@@ -275,9 +295,17 @@ class OneAdapter(CarrierAdapter):
                 url,
                 params={"booking_no": booking_no, "container_no": container_no},
                 timeout=self.timeout_seconds,
+                stream=True,
+                allow_redirects=False,
+                hooks={"response": reject_response_redirect},
             )
-            response.raise_for_status()
-            payload = response.json()
+            try:
+                response.raise_for_status()
+                payload = bounded_response_json(response)
+            finally:
+                response.close()
+        except CarrierResponseLimitError:
+            raise
         except Exception:
             return []
 

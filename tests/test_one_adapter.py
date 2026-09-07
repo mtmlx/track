@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 
 from shipment_sync.clickup_client import ClickUpClient
 from shipment_sync.config import Settings
@@ -21,9 +22,15 @@ from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
 class _StubResponse:
     def __init__(self, payload: dict) -> None:
         self._payload = payload
+        self.content = json.dumps(payload).encode()
+        self._content_consumed = True
+        self.headers = {}
 
     def raise_for_status(self) -> None:
         return None
+
+    def close(self) -> None:
+        pass
 
     def json(self) -> dict:
         return self._payload
@@ -41,7 +48,7 @@ class _StubSession:
     def __init__(self, payload: dict) -> None:
         self.payload = payload
 
-    def get(self, url: str, params: dict[str, str], timeout: int) -> _StubResponse:
+    def get(self, url: str, params: dict[str, str], timeout: int, **kwargs) -> _StubResponse:
         return _StubResponse(self.payload)
 
 
@@ -52,11 +59,11 @@ class _RouteStubSession:
         self.posts: list[dict] = []
         self.gets: list[dict] = []
 
-    def post(self, url: str, json: dict, timeout: int) -> _StubResponse:
+    def post(self, url: str, json: dict, timeout: int, **kwargs) -> _StubResponse:
         self.posts.append({"url": url, "json": json, "timeout": timeout})
         return _StubResponse(self.search_payload)
 
-    def get(self, url: str, params: dict[str, str], timeout: int) -> _StubResponse:
+    def get(self, url: str, params: dict[str, str], timeout: int, **kwargs) -> _StubResponse:
         self.gets.append({"url": url, "params": params, "timeout": timeout})
         return _StubResponse(self.voyage_payload)
 

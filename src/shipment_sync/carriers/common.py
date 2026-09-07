@@ -67,6 +67,14 @@ def carrier_response_max_bytes() -> int:
     )
 
 
+def reject_response_redirect(response: requests.Response, **kwargs: Any) -> requests.Response:
+    """Reject redirects before requests prepares a redirect and buffers its body."""
+    if 300 <= response.status_code < 400:
+        response.close()
+        raise requests.HTTPError("Carrier endpoint returned an unexpected redirect", response=response)
+    return response
+
+
 def bounded_response_bytes(
     response: requests.Response,
     *,

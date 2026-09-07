@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: MTM Logix DCSA Track and Trace shadow-event ledger and least-privilege task role.
+
+Parameters:
+  TableName:
+    Type: String
+    Default: track-trace-dcsa-events
+    AllowedPattern: '[A-Za-z0-9_.-]+'
+    Description: DynamoDB table used only for validated DCSA shadow-event evidence.
+  TaskRoleName:
+    Type: String
+    Default: TrackTraceDcsaShadowTaskRole
+    AllowedPattern: '[A-Za-z0-9+=,.@_-]+'
+    Description: Dedicated ECS task role for the non-projecting DCSA shadow worker.
+  LogGroupName:
+    Type: String
+    Default: /ecs/track-trace/dcsa-shadow
+    Description: CloudWatch log group for the DCSA shadow worker.
+
+Resources:
+  DcsaEventLedger:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      AttributeDefinitions:
+        - AttributeName: event_key
+          AttributeType: S
+        - AttributeName: carrier
+          AttributeType: S
+        - AttributeName: received_at
+          AttributeType: S
+        - AttributeName: task_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_key
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: carrier-received-at-index
+          KeySchema:
+            - AttributeName: carrier
+              KeyType: HASH
+            - AttributeName: received_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: task-received-at-index
+          KeySchema:
+            - AttributeName: task_id
+              KeyType: HASH
+            - AttributeName: received_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Application
+          Value: TrackTrace
+        - Key: Component
+          Value: DcsaShadowLedger
+        - Key: DataClassification
+          Value: OperationalEvidence
+
+  DcsaShadowLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      RetentionInDays: 30
+
+  DcsaShadowTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref TaskRoleName
+      Description: Least-privilege role for the non-projecting Track and Trace DCSA shadow worker.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DcsaShadowEventLedger
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadAndWriteEventLedger
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt DcsaEventLedger.Arn
+              - Sid: QueryEventLedgerIndexes
+                Effect: Allow
+                Action: dynamodb:Query
+                Resource:
+                  - !GetAtt DcsaEventLedger.Arn
+                  - !Sub '${DcsaEventLedger.Arn}/index/*'
+      Tags:
+        - Key: Application
+          Value: TrackTrace
+        - Key: Component
+          Value: DcsaShadow
+
+Outputs:
+  DcsaEventLedgerTableName:
+    Description: DynamoDB table for validated DCSA shadow-event evidence.
+    Value: !Ref DcsaEventLedger
+  DcsaEventLedgerArn:
+    Description: DynamoDB table ARN.
+    Value: !GetAtt DcsaEventLedger.Arn
+  DcsaShadowTaskRoleArn:
+    Description: Dedicated least-privilege ECS task role ARN.
+    Value: !GetAtt DcsaShadowTaskRole.Arn
+  DcsaShadowLogGroupName:
+    Description: CloudWatch log group for the DCSA shadow worker.
+    Value: !Ref DcsaShadowLogGroup
