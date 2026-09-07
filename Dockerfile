@@ -5,15 +5,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONPATH=/app/src \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PATH="/opt/track-venv/bin:$PATH"
 
 WORKDIR /app
 
-COPY pyproject.toml README.md requirements.lock build-requirements.lock /app/
+COPY pyproject.toml README.md requirements.lock build-requirements.lock requirements-os.lock /app/
 COPY src /app/src
 COPY scripts /app/scripts
 
 RUN set -eux; \
+    apt-get update && \
     for package in \
         openssh-client \
         curl \
@@ -30,7 +32,9 @@ RUN set -eux; \
             apt-get purge --auto-remove -y "$package"; \
         fi; \
     done; \
+    sed '/^#/d' /app/requirements-os.lock | xargs apt-get install --only-upgrade --no-install-recommends -y && \
     rm -rf /var/lib/apt/lists/* && \
+    python3 -m venv /opt/track-venv && \
     python3 -m pip install --require-hashes -r /app/requirements.lock -r /app/build-requirements.lock && \
     python3 -m pip install --no-deps --no-build-isolation /app && \
     useradd --create-home --shell /usr/sbin/nologin appuser && \
