@@ -178,12 +178,18 @@ def test_one_edh_bounds_and_closes_every_response(monkeypatch, method, mode):
         return response
     adapter = OneAdapter()
     adapter.session = SimpleNamespace(get=request, post=request)
-    if method == "search":
-        adapter._fetch_status_from_edh("container", adapter.container_type_code)
-    elif method == "voyage":
-        adapter._fetch_voyage_list("booking")
+    def invoke():
+        if method == "search":
+            return adapter._fetch_status_from_edh("container", adapter.container_type_code)
+        if method == "voyage":
+            return adapter._fetch_voyage_list("booking")
+        return adapter._fetch_recent_moves("booking", "container")
+    if mode in {"declared", "streamed"}:
+        from shipment_sync.carriers.common import CarrierResponseLimitError
+        with pytest.raises(CarrierResponseLimitError):
+            invoke()
     else:
-        adapter._fetch_recent_moves("booking", "container")
+        invoke()
     assert response.closed
     if mode in {"declared", "http-error"}:
         assert not response.consumed

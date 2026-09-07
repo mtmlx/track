@@ -1,6 +1,8 @@
 # Track-and-Trace Production Runbook
 
-This is the fastest production path for the current project.
+Current AWS release procedure: [AWS release checklist](AWS_RELEASE.md).
+
+The Render instructions below are a legacy alternative. Do not create duplicate schedules alongside AWS production.
 
 Companion checklist:
 - See [`docs/RENDER_LAUNCH_CHECKLIST.md`](docs/RENDER_LAUNCH_CHECKLIST.md) for the exact service-by-service connection map.
@@ -54,7 +56,7 @@ Recommended ClickUp config:
 - `CLICKUP_CF_SHIPMENT_STATUS`
 - `CLICKUP_CF_STATUS_LAST_CHECKED`
 
-Recommended API/security config:
+Required API/security config:
 - `SHIPMENT_API_TRIGGER_TOKEN`
 
 Carrier config:
