@@ -5,18 +5,18 @@ This is the exact connection map for the Track-and-Trace production launch.
 ## 1. GitHub
 
 Repository:
-- `https://github.com/mavbr2025/track`
+- `https://github.com/mtmlx/track`
 
 What should live there:
 - application code
-- [`render.yaml`](/Users/mario/Documents/New project/render.yaml)
-- [`Dockerfile`](/Users/mario/Documents/New project/Dockerfile)
+- [`render.yaml`](render.yaml)
+- [`Dockerfile`](Dockerfile)
 - scripts and docs
 
 ## 2. Render services
 
 Blueprint file:
-- [`render.yaml`](/Users/mario/Documents/New project/render.yaml)
+- [`render.yaml`](render.yaml)
 
 Services created from the Blueprint:
 - `shipment-api`

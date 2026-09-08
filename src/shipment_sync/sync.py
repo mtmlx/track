@@ -1,3 +1,4 @@
+from .terminal import terminal_safe_text
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -192,7 +193,7 @@ def _run_sync(
             eligible_shipments = kept_shipments
             print("Prefiltered due to carrier preflight failure:", file=sys.stderr)
             for line_name, count in sorted(failed_counts.items(), key=lambda item: (-item[1], item[0])):
-                print(f"- {line_name}: {count} task(s) | {preflight_failures[line_name]}", file=sys.stderr)
+                print(terminal_safe_text(f"- {line_name}: {count} task(s) | {preflight_failures[line_name]}"), file=sys.stderr)
 
     total_eligible = len(eligible_shipments)
     if audit is not None:
@@ -202,12 +203,12 @@ def _run_sync(
             data={"total_candidates": total_candidates, "total_eligible": total_eligible},
         )
     if total_eligible:
-        print(f"Starting shipment sync for {total_eligible} eligible task(s)...", file=sys.stderr)
+        print(terminal_safe_text(f"Starting shipment sync for {total_eligible} eligible task(s)..."), file=sys.stderr)
 
     for idx, shipment in enumerate(eligible_shipments, start=1):
         if idx == 1 or idx == total_eligible or (progress_every > 0 and idx % progress_every == 0):
             print(
-                f"Progress: {idx}/{total_eligible} | task={shipment.task_id} | line={shipment.shipping_line}",
+                terminal_safe_text(f"Progress: {idx}/{total_eligible} | task={shipment.task_id} | line={shipment.shipping_line}"),
                 file=sys.stderr,
             )
 
@@ -305,16 +306,16 @@ def _run_sync(
                 except Exception as comment_exc:
                     posted = False
                     print(
-                        f"Wan Hai manual capture comment failed for task {shipment.task_id}: {comment_exc}",
+                        terminal_safe_text(f"Wan Hai manual capture comment failed for task {shipment.task_id}: {comment_exc}"),
                         file=sys.stderr,
                     )
                 if posted:
                     print(
-                        f"Wan Hai manual capture requested for task {shipment.task_id} ({shipment.task_name}).",
+                        terminal_safe_text(f"Wan Hai manual capture requested for task {shipment.task_id} ({shipment.task_name})."),
                         file=sys.stderr,
                     )
             print(
-                f"Skipped task {shipment.task_id} ({shipment.task_name}): {exc}",
+                terminal_safe_text(f"Skipped task {shipment.task_id} ({shipment.task_name}): {exc}"),
                 file=sys.stderr,
             )
             if audit is not None:
@@ -334,17 +335,17 @@ def _run_sync(
     if prefiltered_excluded_counts:
         print("Prefiltered excluded shipping lines:", file=sys.stderr)
         for line_name, count in sorted(prefiltered_excluded_counts.items(), key=lambda item: (-item[1], item[0])):
-            print(f"- {line_name}: {count} task(s)", file=sys.stderr)
+            print(terminal_safe_text(f"- {line_name}: {count} task(s)"), file=sys.stderr)
 
     if prefiltered_not_allowed_counts:
         print("Prefiltered non-allowlisted shipping lines:", file=sys.stderr)
         for line_name, count in sorted(prefiltered_not_allowed_counts.items(), key=lambda item: (-item[1], item[0])):
-            print(f"- {line_name}: {count} task(s)", file=sys.stderr)
+            print(terminal_safe_text(f"- {line_name}: {count} task(s)"), file=sys.stderr)
 
     if prefiltered_recent_counts:
         print("Prefiltered recently synced tasks:", file=sys.stderr)
         for line_name, count in sorted(prefiltered_recent_counts.items(), key=lambda item: (-item[1], item[0])):
-            print(f"- {line_name}: {count} task(s)", file=sys.stderr)
+            print(terminal_safe_text(f"- {line_name}: {count} task(s)"), file=sys.stderr)
 
     if prefiltered_terminal_status_counts:
         print("Prefiltered terminal shipment statuses:", file=sys.stderr)
@@ -352,17 +353,17 @@ def _run_sync(
             prefiltered_terminal_status_counts.items(),
             key=lambda item: (-item[1], item[0]),
         ):
-            print(f"- {status_name}: {count} task(s)", file=sys.stderr)
+            print(terminal_safe_text(f"- {status_name}: {count} task(s)"), file=sys.stderr)
 
     if unsupported_line_counts:
         print("Skipped unsupported shipping lines:", file=sys.stderr)
         for line_name, count in sorted(unsupported_line_counts.items(), key=lambda item: (-item[1], item[0])):
-            print(f"- {line_name}: {count} task(s)", file=sys.stderr)
+            print(terminal_safe_text(f"- {line_name}: {count} task(s)"), file=sys.stderr)
 
     if adapter_config_counts:
         print("Skipped due to adapter configuration:", file=sys.stderr)
         for reason, count in sorted(adapter_config_counts.items(), key=lambda item: (-item[1], item[0])):
-            print(f"- {reason} [{count} task(s)]", file=sys.stderr)
+            print(terminal_safe_text(f"- {reason} [{count} task(s)]"), file=sys.stderr)
 
     return SyncStats(
         updated_items=updated_items,

@@ -10,6 +10,9 @@ import requests
 
 from shipment_sync.carriers.base import CarrierAdapter
 from shipment_sync.carriers.common import (
+    bounded_response_json,
+    reject_response_redirect,
+    CarrierResponseLimitError,
     extract_container_numbers,
     extract_event_vessel_voyage,
     extract_final_destination_vessel_voyage,
@@ -113,6 +116,26 @@ class MaerskAdapter(CarrierAdapter):
         if fallback_status is not None:
             return fallback_status
         raise ValueError("Missing booking/container number")
+
+    def fetch_dcsa_events(self, shipment: ShipmentRef) -> tuple[list[dict[str, Any]], str]:
+        """Fetch official Maersk Events API payloads without any web fallback.
+
+        This method is used exclusively by the DCSA shadow lane. It must not
+        convert the public tracking website into events because that would make
+        payload-version validation and carrier provenance meaningless.
+        """
+
+        credentials = self._credentials_for(shipment)
+        if self.api_mode != "events" or not self.api_url or not credentials.is_configured:
+            raise ValueError(
+                "Maersk DCSA shadow ingestion requires MAERSK_API_MODE=events and MAERSK_TRACKING_API_URL."
+            )
+        headers = self._build_events_api_headers(credentials)
+        for reference, ref_type in _pick_references(shipment):
+            events = self._fetch_all_events(reference, ref_type, headers)
+            if events:
+                return events, self.api_url
+        return [], self.api_url
 
     def _fetch_status_for_reference(
         self,
@@ -461,10 +484,15 @@ class MaerskAdapter(CarrierAdapter):
                     data=attempt["data"],
                     headers=attempt["headers"],
                     timeout=self.timeout_seconds,
+                    stream=True,
+                    allow_redirects=False,
+                    hooks={"response": reject_response_redirect},
                 )
-                if response.status_code >= 400:
+                try:
                     response.raise_for_status()
-                payload = response.json()
+                    payload = bounded_response_json(response)
+                finally:
+                    response.close()
                 token = payload.get("access_token")
                 if isinstance(token, str) and token:
                     expires_in = payload.get("expires_in", 300)
@@ -477,6 +505,8 @@ class MaerskAdapter(CarrierAdapter):
                         now + timedelta(seconds=max(60, ttl_seconds - 30)),
                     )
                     return token
+            except CarrierResponseLimitError:
+                raise
             except Exception as exc:
                 last_error = exc
 

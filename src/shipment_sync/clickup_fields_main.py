@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .spreadsheet import spreadsheet_safe_cell as _spreadsheet_safe_cell
+
 import argparse
 import csv
 from dataclasses import dataclass, field
@@ -550,16 +552,6 @@ def _write_xlsx(path_text: str, rows: list[dict[str, str]], *, headers: list[str
     for row in rows:
         sheet.append([_spreadsheet_safe_cell(row.get(header, "")) for header in headers])
     workbook.save(path)
-
-
-def _spreadsheet_safe_cell(value: Any) -> Any:
-    """Keep ClickUp-derived text literal in formula-aware spreadsheet clients."""
-    if not isinstance(value, str):
-        return value
-    stripped = value.lstrip()
-    if stripped.startswith(("=", "+", "-", "@")):
-        return f"'{value}"
-    return value
 
 
 def _normalize_flag(value: Any) -> str:

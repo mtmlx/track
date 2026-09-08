@@ -5,6 +5,7 @@ description = "Sync shipment status from carrier websites/APIs to ClickUp tasks"
 requires-python = ">=3.11"
 dependencies = [
   "beautifulsoup4>=4.12.0",
+  "boto3>=1.43.14,<2",
   "fastapi>=0.116.0",
   "requests>=2.32.0",
   "python-dotenv>=1.0.1",
@@ -13,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 browser = [
-  "playwright==1.61.0",
+  "playwright==1.62.0",
 ]
 
 [project.scripts]
@@ -27,6 +28,9 @@ linkedin-candidates = "shipment_sync.linkedin_candidates_main:main"
 linkedin-copilot = "shipment_sync.linkedin_copilot_main:main"
 clickup-fields-export = "shipment_sync.clickup_fields_main:main"
 clickup-workspace-audit = "shipment_sync.clickup_audit_main:main"
+dcsa-tnt-ingest = "shipment_sync.dcsa_tnt_main:main"
+dcsa-tnt-shadow = "shipment_sync.dcsa_shadow_main:main"
+cma-cgm-dcsa-compare = "shipment_sync.cma_cgm_comparison_main:main"
 msc-browser-assisted = "shipment_sync.msc_browser_assisted_main:main"
 
 [build-system]

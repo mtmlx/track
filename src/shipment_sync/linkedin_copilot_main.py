@@ -14,6 +14,7 @@ from urllib.parse import urlparse, urlunparse
 import requests
 from dotenv import load_dotenv
 
+from .clickup_fields_main import _spreadsheet_safe_cell
 from .linkedin_candidates_config import load_criteria
 from .linkedin_candidates_models import JobCriteria
 from .project_paths import REPO_ROOT, local_config_path, resolve_optional_existing_file
@@ -752,6 +753,10 @@ def _build_comment_draft(record: ConnectionRecord, campaign: CampaignConfig) -> 
     )
 
 
+def _safe_csv_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: _spreadsheet_safe_cell(value) for key, value in row.items()}
+
+
 def _write_review_csv(*, selected: list[DraftRecord], destination: Path) -> None:
     headers = [
         "id",
@@ -775,7 +780,7 @@ def _write_review_csv(*, selected: list[DraftRecord], destination: Path) -> None
         writer = csv.DictWriter(handle, fieldnames=headers)
         writer.writeheader()
         for row in selected:
-            writer.writerow(
+            writer.writerow(_safe_csv_row(
                 {
                     "id": row.id,
                     "full_name": row.full_name,
@@ -793,7 +798,7 @@ def _write_review_csv(*, selected: list[DraftRecord], destination: Path) -> None
                     "edited_comment": "",
                     "notes": "",
                 }
-            )
+            ))
 
 
 def _write_filtered_csv(*, records: list[FilteredOutRecord], destination: Path) -> None:
@@ -802,7 +807,7 @@ def _write_filtered_csv(*, records: list[FilteredOutRecord], destination: Path) 
         writer = csv.DictWriter(handle, fieldnames=headers)
         writer.writeheader()
         for row in records:
-            writer.writerow(
+            writer.writerow(_safe_csv_row(
                 {
                     "id": row.id,
                     "full_name": row.full_name,
@@ -813,7 +818,7 @@ def _write_filtered_csv(*, records: list[FilteredOutRecord], destination: Path) 
                     "position": row.position or "",
                     "connected_on": row.connected_on or "",
                 }
-            )
+            ))
 
 
 def _build_approved_queue(approval_file: Path, *, output_dir: Path, timestamp: str) -> Path:
@@ -852,7 +857,7 @@ def _build_approved_queue(approval_file: Path, *, output_dir: Path, timestamp: s
     with destination.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers)
         writer.writeheader()
-        writer.writerows(approved_rows)
+        writer.writerows(_safe_csv_row(row) for row in approved_rows)
 
     print(f"Approved rows: {len(approved_rows)}")
     return destination

@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import html
 import json
 import os
+import secrets
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -47,7 +50,8 @@ def main() -> None:
 
     load_dotenv()
     config = _load_config()
-    auth_url = _build_auth_url(config)
+    state = secrets.token_urlsafe(32)
+    auth_url = _build_auth_url(config, state=state)
 
     if args.print_url:
         print(auth_url)
@@ -55,7 +59,7 @@ def main() -> None:
 
     code = args.code
     if not code:
-        code = _capture_code(config, auth_url, timeout_seconds=max(args.timeout_seconds, 1), open_browser=not args.no_browser)
+        code = _capture_code(config, auth_url, state=state, timeout_seconds=max(args.timeout_seconds, 1), open_browser=not args.no_browser)
 
     try:
         token = _exchange_code(config, code)
@@ -93,11 +97,12 @@ def _load_config() -> OAuthConfig:
     )
 
 
-def _build_auth_url(config: OAuthConfig) -> str:
+def _build_auth_url(config: OAuthConfig, *, state: str) -> str:
     query = urlencode(
         {
             "client_id": config.client_id,
             "redirect_uri": config.redirect_uri,
+            "state": state,
         }
     )
     return f"{AUTH_URL}?{query}"
@@ -107,6 +112,7 @@ def _capture_code(
     config: OAuthConfig,
     auth_url: str,
     *,
+    state: str,
     timeout_seconds: int,
     open_browser: bool,
 ) -> str:
@@ -121,7 +127,7 @@ def _capture_code(
 
     path = parsed.path or "/"
     holder: dict[str, Any] = {"code": None, "error": None}
-    server = HTTPServer((parsed.hostname, parsed.port), _build_handler(path, holder))
+    server = HTTPServer((parsed.hostname, parsed.port), _build_handler(path, holder, expected_state=state))
     server.timeout = timeout_seconds
 
     print("Open this URL in your browser and approve the ClickUp app:")
@@ -132,15 +138,16 @@ def _capture_code(
     deadline_message = f"Waiting up to {timeout_seconds} seconds for ClickUp callback on {config.redirect_uri}..."
     print(deadline_message)
 
-    while holder["code"] is None and holder["error"] is None:
-        server.handle_request()
-        if holder["code"] is not None or holder["error"] is not None:
-            break
-        timeout_seconds -= server.timeout
-        if timeout_seconds <= 0:
-            break
-
-    server.server_close()
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while holder["code"] is None and holder["error"] is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            server.timeout = remaining
+            server.handle_request()
+    finally:
+        server.server_close()
 
     if holder["error"]:
         raise ValueError(f"ClickUp OAuth failed: {holder['error']}")
@@ -152,7 +159,10 @@ def _capture_code(
     return str(holder["code"])
 
 
-def _build_handler(expected_path: str, holder: dict[str, Any]):
+def _build_handler(expected_path: str, holder: dict[str, Any], *, expected_state: str):
+    if not expected_state:
+        raise ValueError("OAuth state must not be empty")
+
     class CallbackHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -162,7 +172,13 @@ def _build_handler(expected_path: str, holder: dict[str, Any]):
                 self.wfile.write(b"Not found.")
                 return
 
-            query = parse_qs(parsed.query)
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            states = query.get("state", [])
+            if len(states) != 1 or not secrets.compare_digest(states[0].encode(), expected_state.encode()):
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Invalid OAuth state.")
+                return
             holder["code"] = _first(query.get("code"))
             holder["error"] = _first(query.get("error")) or _first(query.get("error_description"))
 
@@ -175,7 +191,7 @@ def _build_handler(expected_path: str, holder: dict[str, Any]):
                     "<p>You can close this window and return to Terminal.</p></body></html>"
                 )
             else:
-                detail = holder["error"] or "Unknown error"
+                detail = html.escape(str(holder["error"] or "Unknown error"))
                 body = (
                     "<html><body><h2>ClickUp authorization failed.</h2>"
                     f"<p>{detail}</p></body></html>"

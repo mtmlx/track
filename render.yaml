@@ -3,7 +3,7 @@ services:
     name: shipment-api
     runtime: docker
     plan: starter
-    repo: https://github.com/mavbr2025/track
+    repo: https://github.com/mtmlx/track
     branch: main
     dockerfilePath: ./Dockerfile
     dockerContext: .
@@ -108,7 +108,7 @@ services:
     name: track-trace-cron
     runtime: docker
     plan: starter
-    repo: https://github.com/mavbr2025/track
+    repo: https://github.com/mtmlx/track
     branch: main
     dockerfilePath: ./Dockerfile
     dockerContext: .

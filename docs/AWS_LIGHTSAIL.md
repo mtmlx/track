@@ -12,7 +12,7 @@ sudo apt-get install -y git docker.io docker-compose-v2 docker-buildx
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
 
-git clone https://github.com/mavbr2025/track.git
+git clone https://github.com/mtmlx/track.git
 cd track
 docker build -t track-trace .
 ```

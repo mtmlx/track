@@ -191,65 +191,80 @@ class MscAdapter(CarrierAdapter):
 
                     response_payload = page.evaluate(
                         """
-                        async ({ url, token, trackingMode, reference, maxBytes }) => {
-                            const body = new URLSearchParams({
-                                "__RequestVerificationToken": token,
-                                "trackingMode": trackingMode,
-                                "trackingNumber": reference,
+                        async ({ url, token, trackingMode, reference, maxBytes, timeoutMs }) => {
+                            const controller = new AbortController();
+                            let timer;
+                            const deadline = new Promise((_, reject) => {
+                                timer = setTimeout(() => {
+                                    controller.abort();
+                                    reject(new Error("MSC TrackingInfo response deadline exceeded"));
+                                }, timeoutMs);
                             });
-                            const response = await fetch(url, {
-                                method: "POST",
-                                credentials: "same-origin",
-                                headers: {
-                                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                                    "X-Requested-With": "XMLHttpRequest",
-                                    "Accept": "application/json, text/plain, */*",
-                                },
-                                body,
-                            });
-                            const declaredLength = Number(response.headers.get("content-length") || "0");
-                            if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-                                return {
-                                    status: response.status,
-                                    responseTooLarge: true,
-                                    responseBytes: declaredLength,
-                                    url: response.url,
-                                };
-                            }
-                            const reader = response.body?.getReader();
-                            if (!reader) {
-                                throw new Error("MSC TrackingInfo response has no readable body");
-                            }
-                            let total = 0;
-                            const chunks = [];
-                            while (true) {
-                                const { done, value } = await reader.read();
-                                if (done) break;
-                                total += value.byteLength;
-                                if (total > maxBytes) {
-                                    await reader.cancel();
+                            try {
+                                const body = new URLSearchParams({
+                                    "__RequestVerificationToken": token,
+                                    "trackingMode": trackingMode,
+                                    "trackingNumber": reference,
+                                });
+                                const response = await Promise.race([fetch(url, {
+                                    signal: controller.signal,
+                                    method: "POST",
+                                    credentials: "same-origin",
+                                    headers: {
+                                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                                        "X-Requested-With": "XMLHttpRequest",
+                                        "Accept": "application/json, text/plain, */*",
+                                    },
+                                    body,
+                                }), deadline]);
+                                const declaredLength = Number(response.headers.get("content-length") || "0");
+                                if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+                                    controller.abort();
                                     return {
                                         status: response.status,
                                         responseTooLarge: true,
-                                        responseBytes: total,
+                                        responseBytes: declaredLength,
                                         url: response.url,
                                     };
                                 }
-                                chunks.push(value);
+                                const reader = response.body?.getReader();
+                                if (!reader) {
+                                    throw new Error("MSC TrackingInfo response has no readable body");
+                                }
+                                let total = 0;
+                                const chunks = [];
+                                while (true) {
+                                    const { done, value } = await Promise.race([reader.read(), deadline]);
+                                    if (done) break;
+                                    total += value.byteLength;
+                                    if (total > maxBytes) {
+                                        controller.abort();
+                                        return {
+                                            status: response.status,
+                                            responseTooLarge: true,
+                                            responseBytes: total,
+                                            url: response.url,
+                                        };
+                                    }
+                                    chunks.push(value);
+                                }
+                                const bytes = new Uint8Array(total);
+                                let offset = 0;
+                                for (const chunk of chunks) {
+                                    bytes.set(chunk, offset);
+                                    offset += chunk.byteLength;
+                                }
+                                const text = new TextDecoder().decode(bytes);
+                                return {
+                                    status: response.status,
+                                    text,
+                                    responseBytes: total,
+                                    url: response.url,
+                                };
+                            } finally {
+                                clearTimeout(timer);
+                                controller.abort();
                             }
-                            const bytes = new Uint8Array(total);
-                            let offset = 0;
-                            for (const chunk of chunks) {
-                                bytes.set(chunk, offset);
-                                offset += chunk.byteLength;
-                            }
-                            const text = new TextDecoder().decode(bytes);
-                            return {
-                                status: response.status,
-                                text,
-                                responseBytes: total,
-                                url: response.url,
-                            };
                         }
                         """,
                         {
@@ -258,6 +273,7 @@ class MscAdapter(CarrierAdapter):
                             "trackingMode": tracking_mode,
                             "reference": reference,
                             "maxBytes": self.response_max_bytes,
+                            "timeoutMs": timeout_ms,
                         },
                     )
                     response_status = int(response_payload.get("status", 0))

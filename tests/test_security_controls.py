@@ -183,6 +183,9 @@ def test_deployment_build_uses_pinned_and_hashed_inputs() -> None:
     assert "@sha256:" in dockerfile
     assert "--require-hashes -r /app/requirements.lock" in dockerfile
     assert "apt-get upgrade" not in dockerfile
+    assert "requirements-os.lock" in dockerfile
+    os_pins = (REPOSITORY_ROOT / "requirements-os.lock").read_text().splitlines()
+    assert all("=" in line and "*" not in line for line in os_pins if line and not line.startswith("#"))
     assert "playwright install" not in dockerfile
     assert "--hash=sha256:" in lockfile
     assert "--hash=sha256:" in build_lockfile

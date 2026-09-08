@@ -1,9 +1,11 @@
 # Track-and-Trace Production Runbook
 
-This is the fastest production path for the current project.
+Current AWS release procedure: [AWS release checklist](AWS_RELEASE.md).
+
+The Render instructions below are a legacy alternative. Do not create duplicate schedules alongside AWS production.
 
 Companion checklist:
-- See [`docs/RENDER_LAUNCH_CHECKLIST.md`](/Users/mario/Documents/New%20project/docs/RENDER_LAUNCH_CHECKLIST.md) for the exact service-by-service connection map.
+- See [`docs/RENDER_LAUNCH_CHECKLIST.md`](docs/RENDER_LAUNCH_CHECKLIST.md) for the exact service-by-service connection map.
 
 Phase 1 scope:
 - Deploy Track-and-Trace first
@@ -24,7 +26,7 @@ Phase 1 scope:
 - Runs `./scripts/run_sync.sh` every 2 hours by default
 
 3. Shared Docker image
-- Built from [`Dockerfile`](/Users/mario/Documents/New project/Dockerfile)
+- Built from [`Dockerfile`](Dockerfile)
 - Includes Playwright and browser dependencies for MSC
 
 ## What to connect where
@@ -32,8 +34,8 @@ Phase 1 scope:
 ### 1. GitHub -> Render
 
 Connect the private GitHub repository to Render and deploy the Blueprint:
-- File: `/Users/mario/Documents/New project/render.yaml`
-- Repo: `https://github.com/mavbr2025/track`
+- File: `render.yaml`
+- Repo: `https://github.com/mtmlx/track`
 
 Render will create:
 - `shipment-api`
@@ -54,7 +56,7 @@ Recommended ClickUp config:
 - `CLICKUP_CF_SHIPMENT_STATUS`
 - `CLICKUP_CF_STATUS_LAST_CHECKED`
 
-Recommended API/security config:
+Required API/security config:
 - `SHIPMENT_API_TRIGGER_TOKEN`
 
 Carrier config:
@@ -136,18 +138,18 @@ Optional operational checks:
 ## Repository target
 
 Production repo target:
-- `https://github.com/mavbr2025/track`
+- `https://github.com/mtmlx/track`
 
 If this local repo has not been connected to that remote yet, add it locally with:
 
 ```bash
-git remote add origin https://github.com/mavbr2025/track
+git remote add origin https://github.com/mtmlx/track
 ```
 
 If `origin` already exists, update it with:
 
 ```bash
-git remote set-url origin https://github.com/mavbr2025/track
+git remote set-url origin https://github.com/mtmlx/track
 ```
 
 ## Current blockers before full rollout

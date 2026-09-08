@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import os
 import re
 import time
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 import requests
 
@@ -25,6 +26,30 @@ from shipment_sync.carriers.common import (
 )
 from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
 from shipment_sync.playwright_runner import configured_browser_channel, run_sync_playwright
+
+
+@dataclass(frozen=True)
+class CmaCgmDcsaEventFetch:
+    """Official CMA DCSA events plus the first-page legacy interpretation input.
+
+    The normal CMA adapter historically consumes only one response page.  The
+    DCSA lane consumes all explicitly linked pages, so retaining the first
+    page makes an apples-to-apples comparison possible without a second carrier
+    request or a ClickUp write.
+    """
+
+    first_page_payload: dict[str, Any]
+    events: tuple[dict[str, Any], ...]
+    source_url: str
+    page_count: int
+
+
+@dataclass(frozen=True)
+class CmaCgmComparisonInput:
+    """Read-only inputs for comparing the legacy and canonical CMA paths."""
+
+    legacy_status: ShipmentStatus
+    dcsa_fetch: CmaCgmDcsaEventFetch
 
 
 class CmaCgmAdapter(CarrierAdapter):
@@ -84,6 +109,7 @@ class CmaCgmAdapter(CarrierAdapter):
         self.timeout_seconds = int(os.getenv("CMA_CGM_TIMEOUT_SECONDS", "45"))
         self.max_retries = int(os.getenv("CMA_CGM_MAX_RETRIES", "2"))
         self.retry_delay_seconds = float(os.getenv("CMA_CGM_RETRY_DELAY_SECONDS", "2"))
+        self.dcsa_max_pages = _bounded_env_int("CMA_CGM_DCSA_MAX_PAGES", default=25, maximum=250)
         self.session = requests.Session()
         self._oauth_access_token: str | None = None
         self._oauth_expires_at: datetime | None = None
@@ -131,6 +157,104 @@ class CmaCgmAdapter(CarrierAdapter):
             source=source,
             source_url=source_url,
             playwright_error=playwright_error,
+        )
+
+    def fetch_dcsa_events(self, shipment: ShipmentRef) -> tuple[list[dict[str, Any]], str]:
+        """Fetch CMA's official DCSA event payload without website fallback.
+
+        This is intentionally separate from ``fetch_status``. Shadow ingestion
+        must capture the carrier contract exactly as returned by the official
+        API and must never turn a browser-derived status into a DCSA event.
+        """
+
+        fetched = self._fetch_dcsa_event_pages(shipment)
+        return list(fetched.events), fetched.source_url
+
+    def fetch_comparison_input(self, shipment: ShipmentRef) -> CmaCgmComparisonInput:
+        """Fetch one official response stream for a legacy-versus-DCSA comparison.
+
+        The legacy snapshot is intentionally created from the first API page,
+        matching the existing adapter's one-response behavior.  The DCSA side
+        receives the complete bounded cursor chain from that same initial
+        response.  This keeps the comparison reproducible without an extra
+        carrier request or a fallback to the public website.
+        """
+
+        reference, ref_type = _pick_reference(
+            shipment=shipment,
+            booking_code=self.booking_type_code,
+            container_code=self.container_type_code,
+        )
+        fetched = self._fetch_dcsa_event_pages(shipment)
+        return CmaCgmComparisonInput(
+            legacy_status=self._status_from_payload(
+                payload=fetched.first_page_payload,
+                source=f"cma-api:{fetched.source_url}",
+                source_url=_build_source_url(self.url_template, reference, ref_type),
+            ),
+            dcsa_fetch=fetched,
+        )
+
+    def _fetch_dcsa_event_pages(self, shipment: ShipmentRef) -> CmaCgmDcsaEventFetch:
+        if not self._api_mode_requested():
+            raise ValueError(
+                "CMA DCSA shadow ingestion requires CMA_CGM_TRACKING_API_URL or CMA_CGM_API_BASE_URL."
+            )
+
+        reference, ref_type = _pick_reference(
+            shipment=shipment,
+            booking_code=self.booking_type_code,
+            container_code=self.container_type_code,
+        )
+        request_url = self._resolve_api_url()
+        if not request_url:  # pragma: no cover - guarded by _api_mode_requested
+            raise RuntimeError("CMA DCSA shadow ingestion refused an empty API URL.")
+
+        source_url = self._format_reference_placeholders(request_url, reference=reference, ref_type=ref_type)
+        current_url = source_url
+        initial_params = self._build_api_params(reference=reference, ref_type=ref_type) or {}
+        current_params: dict[str, str] | None = dict(initial_params) or None
+        headers = self._api_headers()
+        first_page_payload: dict[str, Any] | None = None
+        events: list[dict[str, Any]] = []
+        seen_requests: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+
+        while True:
+            request_signature = (current_url, tuple(sorted((current_params or {}).items())))
+            if request_signature in seen_requests:
+                raise ValueError("CMA DCSA pagination repeated a page request.")
+            seen_requests.add(request_signature)
+
+            response = self._request_with_retries(
+                current_url,
+                params=current_params,
+                headers=headers,
+            )
+            payload = self._parse_payload(response)
+            if first_page_payload is None:
+                first_page_payload = payload
+            events.extend(event for event in _extract_event_list(payload) if isinstance(event, dict))
+
+            next_page = _next_page_header(response)
+            if next_page is None:
+                break
+            if len(seen_requests) >= self.dcsa_max_pages:
+                raise ValueError(
+                    "CMA DCSA pagination exceeded CMA_CGM_DCSA_MAX_PAGES before the final page."
+                )
+            current_url, current_params = _next_page_request(
+                next_page,
+                source_url=source_url,
+                initial_params=initial_params,
+            )
+
+        if first_page_payload is None:  # pragma: no cover - loop always creates it
+            raise RuntimeError("CMA DCSA response stream did not provide an initial page.")
+        return CmaCgmDcsaEventFetch(
+            first_page_payload=first_page_payload,
+            events=tuple(events),
+            source_url=source_url,
+            page_count=len(seen_requests),
         )
 
     def _status_from_payload(
@@ -463,6 +587,95 @@ class CmaCgmAdapter(CarrierAdapter):
             return {"data": payload}
         except Exception:
             raise ValueError("Could not parse JSON payload from CMA-CGM tracking response")
+
+
+def _next_page_header(response: requests.Response) -> str | None:
+    headers = getattr(response, "headers", {}) or {}
+    value = None
+    for key, candidate in headers.items():
+        if str(key).casefold() == "next-page":
+            value = candidate
+            break
+    if value is None:
+        return None
+    next_page = str(value).strip()
+    if not next_page:
+        return None
+    if len(next_page) > 4096:
+        raise ValueError("CMA DCSA Next-Page header exceeds the safety limit.")
+    return next_page
+
+
+def _next_page_request(
+    next_page: str,
+    *,
+    source_url: str,
+    initial_params: dict[str, str],
+) -> tuple[str, dict[str, str] | None]:
+    """Turn CMA's documented cursor/link header into a same-origin request.
+
+    CMA documents ``Next-Page`` as a cursor value, while some DCSA providers
+    return a relative or absolute link.  Both forms are supported, but an
+    arbitrary carrier-controlled host is never followed.
+    """
+
+    source = urlsplit(source_url)
+    base_params = dict(parse_qsl(source.query, keep_blank_values=True))
+    base_params.update(initial_params)
+    candidate = urlsplit(next_page)
+
+    if candidate.scheme or candidate.netloc:
+        if not _same_origin(candidate, source):
+            raise ValueError("CMA DCSA Next-Page header points to a different origin.")
+        if candidate.username or candidate.password:
+            raise ValueError("CMA DCSA Next-Page header must not contain user credentials.")
+        params = dict(base_params)
+        params.update(dict(parse_qsl(candidate.query, keep_blank_values=True)))
+        return (
+            urlunsplit((source.scheme, source.netloc, candidate.path or source.path, "", "")),
+            params or None,
+        )
+
+    if next_page.startswith("/"):
+        params = dict(base_params)
+        params.update(dict(parse_qsl(candidate.query, keep_blank_values=True)))
+        return (
+            urlunsplit((source.scheme, source.netloc, candidate.path or source.path, "", "")),
+            params or None,
+        )
+
+    query_value = next_page[1:] if next_page.startswith("?") else next_page
+    query_params = dict(parse_qsl(query_value, keep_blank_values=True))
+    if "cursor" in query_params:
+        params = dict(base_params)
+        params.update(query_params)
+        return (urlunsplit((source.scheme, source.netloc, source.path, "", "")), params or None)
+
+    params = dict(base_params)
+    params["cursor"] = next_page
+    return (urlunsplit((source.scheme, source.netloc, source.path, "", "")), params)
+
+
+def _same_origin(candidate: object, source: object) -> bool:
+    candidate_scheme = str(getattr(candidate, "scheme", "")).casefold()
+    candidate_hostname = str(getattr(candidate, "hostname", "") or "").casefold()
+    candidate_port = getattr(candidate, "port", None)
+    source_scheme = str(getattr(source, "scheme", "")).casefold()
+    source_hostname = str(getattr(source, "hostname", "") or "").casefold()
+    source_port = getattr(source, "port", None)
+    return (
+        candidate_scheme == source_scheme
+        and candidate_hostname == source_hostname
+        and candidate_port == source_port
+    )
+
+
+def _bounded_env_int(key: str, *, default: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(key, str(default)).strip())
+    except ValueError:
+        return default
+    return max(1, min(value, maximum))
 
 
 def _pick_reference(shipment: ShipmentRef, booking_code: str, container_code: str) -> tuple[str, str]:

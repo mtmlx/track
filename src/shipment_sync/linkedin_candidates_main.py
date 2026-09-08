@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .terminal import terminal_safe_text
+
 import argparse
 import json
 import os
@@ -82,9 +84,9 @@ def main() -> None:
         if not fields:
             print("No custom fields found for CLICKUP_CANDIDATES_LIST_ID.")
             return
-        print(f"Found {len(fields)} custom fields:")
+        print(terminal_safe_text(f"Found {len(fields)} custom fields:"))
         for field in fields:
-            print(f"- id={field['id']} | name={field['name']} | type={field['type']}")
+            print(terminal_safe_text(f"- id={field['id']} | name={field['name']} | type={field['type']}"))
         return
 
     jobs = load_criteria(
@@ -103,11 +105,11 @@ def main() -> None:
         job_results.append(result)
 
     if args.print_queries:
-        print("Generated queries:" if not csv_mode else "Data sources:")
+        print(terminal_safe_text("Generated queries:" if not csv_mode else "Data sources:"))
         for result in job_results:
-            print(f"- {result.job.job_name}")
+            print(terminal_safe_text(f"- {result.job.job_name}"))
             for query in result.queries:
-                print(f"  - {query}")
+                print(terminal_safe_text(f"  - {query}"))
 
     candidates = merge_job_candidates(job_results)
     _print_candidate_preview(candidates)
@@ -116,19 +118,19 @@ def main() -> None:
         output_path = Path(args.output_json)
         payload = [candidate.to_dict() for candidate in candidates]
         output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        print(f"Wrote {len(candidates)} candidates to {output_path}")
+        print(terminal_safe_text(f"Wrote {len(candidates)} candidates to {output_path}"))
 
     if args.dry_run:
         if clickup_client:
             stats = sync_candidates_to_clickup(clickup_client, candidates, dry_run=True)
             print(
-                "Dry run complete. "
+                terminal_safe_text("Dry run complete. "
                 f"Candidates: {stats.total_candidates}, "
                 f"To create: {stats.to_create}, "
-                f"Already existing: {stats.skipped_existing}"
+                f"Already existing: {stats.skipped_existing}")
             )
         else:
-            print(f"Dry run complete. Candidates found: {len(candidates)}")
+            print(terminal_safe_text(f"Dry run complete. Candidates found: {len(candidates)}"))
         return
 
     if clickup_client is None:
@@ -136,30 +138,30 @@ def main() -> None:
 
     stats = sync_candidates_to_clickup(clickup_client, candidates, dry_run=False)
     print(
-        "LinkedIn candidate sync complete. "
+        terminal_safe_text("LinkedIn candidate sync complete. "
         f"Candidates: {stats.total_candidates}, "
         f"To create: {stats.to_create}, "
         f"Created: {stats.created}, "
         f"Already existing: {stats.skipped_existing}, "
-        f"Errors: {len(stats.errors)}"
+        f"Errors: {len(stats.errors)}")
     )
     if stats.errors:
         for err in stats.errors:
-            print(f"- {err}")
+            print(terminal_safe_text(f"- {err}"))
 
 
 def _print_candidate_preview(candidates: list[CandidateProfile]) -> None:
-    print(f"Candidates found: {len(candidates)}")
+    print(terminal_safe_text(f"Candidates found: {len(candidates)}"))
     for index, candidate in enumerate(candidates, start=1):
         roles = ", ".join(candidate.job_names) if candidate.job_names else "n/a"
         source_query = candidate.source_queries[0] if candidate.source_queries else "n/a"
         print(
-            f"{index}. score={candidate.score} | name={candidate.full_name} | "
-            f"roles={roles} | linkedin={candidate.linkedin_url}"
+            terminal_safe_text(f"{index}. score={candidate.score} | name={candidate.full_name} | "
+            f"roles={roles} | linkedin={candidate.linkedin_url}")
         )
-        print(f"   source={source_query}")
+        print(terminal_safe_text(f"   source={source_query}"))
         if candidate.headline:
-            print(f"   headline={candidate.headline}")
+            print(terminal_safe_text(f"   headline={candidate.headline}"))
 
 
 def _has_clickup_credentials() -> bool:

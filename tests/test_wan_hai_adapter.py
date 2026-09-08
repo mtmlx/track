@@ -25,7 +25,7 @@ def test_wan_hai_prefers_booking_before_existing_containers() -> None:
     assert attempts[:2] == [("031G539204", "2"), ("WHSU4002923", "1")]
 
 
-def test_wan_hai_uses_reference_hints_after_structured_booking() -> None:
+def test_wan_hai_ignores_unverifiable_hints_without_known_container() -> None:
     attempts = _build_reference_attempts(
         ShipmentRef(
             task_id="task-1",
@@ -38,7 +38,7 @@ def test_wan_hai_uses_reference_hints_after_structured_booking() -> None:
         )
     )
 
-    assert attempts == [("027G709927", "2"), ("WI666V70037", "2")]
+    assert attempts == [("027G709927", "2")]
 
 
 def test_wan_hai_extracts_booking_and_mbl_hints_from_clickup_comment() -> None:

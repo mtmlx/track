@@ -13,3 +13,12 @@ __pycache__
 *.sqlite
 *.db
 MTM Track and Trace.app
+
+.env
+.env.*
+!.env.example
+outputs
+data
+*.pem
+*.key
+invoice-webhook-error-release-clone
