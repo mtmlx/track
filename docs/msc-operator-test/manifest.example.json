@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "task_id": "REPLACE_WITH_INTERNAL_TASK_ID",
+  "task_name": "REPLACE_WITH_APPROVED_SHIPMENT_NAME",
+  "list_id": "REPLACE_WITH_LIST_ID",
+  "booking_no": "REPLACE_WITH_BOOKING",
+  "destination_port": "REPLACE_WITH_CONFIRMED_POD",
+  "containers": ["REPLACE_WITH_EACH_CONTAINER"],
+  "operator": "REPLACE_WITH_OPERATOR_NAME",
+  "task_reviewed_at": "REPLACE_WITH_LIVE_TASK_REVIEW_TIMESTAMP_WITH_TIMEZONE",
+  "captured_at": "REPLACE_AFTER_CAPTURE_WITH_TIMESTAMP_WITH_TIMEZONE"
+}
