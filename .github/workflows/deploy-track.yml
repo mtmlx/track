@@ -18,7 +18,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - run: python -m pip install boto3==1.43.61 pytest==9.1.1 requests
+      - name: Install application and test dependencies
+        run: python -m pip install . boto3==1.43.61 pytest==9.1.1
       - run: python -m pytest tests/test_release_orchestration.py -q
       - name: Validate destination arrival and carrier regressions
         run: PYTHONPATH=src python -m pytest tests/test_destination_arrival.py tests/test_msc_browser_assisted.py tests/test_msc_adapter.py tests/test_track_trace_mapping.py -q
