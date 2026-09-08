@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from datetime import date, datetime, timezone
 import re
@@ -15,6 +16,7 @@ import requests
 
 from .carriers.common import extract_container_numbers
 from .config import Settings
+from .destination import same_port
 from .date_utils import format_display_date, format_port_local_time
 from .models import (
     MovementEvent,
@@ -183,6 +185,7 @@ class ClickUpClient:
                         for field_id, field_payload in fields.items()
                     },
                     reference_hints=reference_hints,
+                    destination_port=_shipment_destination(fields),
                 )
             )
         print(f"ClickUp candidate shipment tasks: {len(shipments)}", file=sys.stderr)
@@ -255,6 +258,7 @@ class ClickUpClient:
                         else None
                     ),
                     expected_container_count=_expected_container_count(task.get("custom_fields", [])),
+                    destination_port=_shipment_destination(fields),
                     current_field_values={
                         field_id: field_payload.get("value")
                         for field_id, field_payload in fields.items()
@@ -678,6 +682,13 @@ class ClickUpClient:
         return comments
 
     def plan_shipment_update(self, shipment: ShipmentRef, status: ShipmentStatus) -> ShipmentUpdatePlan:
+        if status.require_destination_evidence and shipment.destination_port:
+            # A conflicting carrier POD must not override the shipment's destination.
+            status = replace(status, destination_port=(
+                shipment.destination_port
+                if same_port(shipment.destination_port, status.destination_port)
+                else None
+            ))
         now_utc = datetime.now(timezone.utc)
         last_checked_display = now_utc.isoformat(timespec="seconds")
         eta_text = _format_event_time(status.eta_local_text, status.eta_time)
@@ -1021,6 +1032,10 @@ def _field_map(custom_fields: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
     return {f["id"]: f for f in custom_fields if "id" in f}
 
 
+def _shipment_destination(fields: dict[str, dict[str, Any]]) -> str | None:
+    return _field_text(fields.get("303d68fa-f250-43ac-abe8-17b70e07b46d"))
+
+
 def _expected_container_count(custom_fields: Any) -> int | None:
     if not isinstance(custom_fields, list):
         return None
@@ -1060,7 +1075,7 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
     if not ordered_moves:
         return updates
 
-    destination_discharge_index = _find_destination_discharge_index(ordered_moves)
+    destination_discharge_index = _validated_destination_discharge_index(status, ordered_moves)
     pre_discharge_moves = (
         ordered_moves[:destination_discharge_index]
         if destination_discharge_index is not None
@@ -1071,6 +1086,12 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
         if destination_discharge_index is not None
         else []
     )
+    if status.require_destination_evidence:
+        post_discharge_moves = [
+            move for move in post_discharge_moves
+            if _event_code_from_move(move) != "DISC"
+            or _is_destination_discharge(status, move)
+        ]
 
     updates.extend(
         _build_move_field_updates(
@@ -1391,7 +1412,10 @@ def _derive_operational_status_step(
             if 5 <= days_until_eta <= 10:
                 target_step = _max_workflow_step(target_step, "arriving")
 
-    if discharge_date is not None:
+    if discharge_date is not None and (
+        not status.require_destination_evidence
+        or _validated_destination_discharge_index(status, _order_moves_ascending(status.recent_moves)) is not None
+    ):
         target_step = _max_workflow_step(target_step, "arrived_port")
 
     if "at_rail" in status_by_step and _has_actual_rail_departure(status, current_step=current_step):
@@ -1607,11 +1631,11 @@ def _has_actual_rail_ramp_arrival(status: ShipmentStatus, *, current_step: str) 
 
 def _post_discharge_moves(status: ShipmentStatus, *, current_step: str) -> list[MovementEvent]:
     ordered_moves = _order_moves_ascending(status.recent_moves)
-    discharge_index = _find_destination_discharge_index(ordered_moves)
+    discharge_index = _validated_destination_discharge_index(status, ordered_moves)
     if discharge_index is not None:
         return ordered_moves[discharge_index + 1 :]
 
-    if _workflow_step_order(current_step) >= _workflow_step_order("arrived_port"):
+    if not status.require_destination_evidence and _workflow_step_order(current_step) >= _workflow_step_order("arrived_port"):
         return ordered_moves
     return []
 
@@ -1726,6 +1750,26 @@ def _build_move_field_updates(
             )
         )
     return updates
+
+
+def _validated_destination_discharge_index(status: ShipmentStatus, moves: list[MovementEvent]) -> int | None:
+    if not status.require_destination_evidence:
+        return _find_destination_discharge_index(moves)
+    for idx, move in enumerate(moves):
+        if _is_destination_discharge(status, move):
+            return idx
+    return None
+
+
+def _is_destination_discharge(status: ShipmentStatus, move: MovementEvent) -> bool:
+    return (
+        _event_code_from_move(move) == "DISC"
+        and (move.event_state or "").strip().lower() == "actual"
+        and move.event_time is not None
+        and move.event_time.tzinfo is not None
+        and move.event_time <= datetime.now(timezone.utc)
+        and same_port(status.destination_port, move.location)
+    )
 
 
 def _find_destination_discharge_index(moves: list[MovementEvent]) -> int | None:

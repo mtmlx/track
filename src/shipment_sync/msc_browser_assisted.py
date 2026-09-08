@@ -8,6 +8,7 @@ import re
 from typing import Iterable
 
 from shipment_sync.carriers.msc import _status_from_payload
+from shipment_sync.destination import same_port
 from shipment_sync.models import ShipmentRef, ShipmentStatus
 
 
@@ -176,6 +177,8 @@ def status_from_browser_capture(text: str) -> ShipmentStatus:
         eta_only_mode=True,
     )
     status.discovered_containers = containers
+    status.destination_port = _value_after_label(lines, "Port of Discharge")
+    status.require_destination_evidence = True
     # A visible page is reliable for movement facts but not a blanket authority
     # to replace a manually corrected container list.
     status.container_discovery_authoritative = False
@@ -261,6 +264,10 @@ def consolidate_browser_statuses(
         )
 
     statuses = [status for _, status in entries]
+    if any(status.require_destination_evidence for status in statuses):
+        destination = statuses[0].destination_port
+        if not all(same_port(destination, status.destination_port) for status in statuses):
+            raise ValueError("MSC destination port is missing or disagrees across containers")
     eta_values = {_canonical_datetime(status.eta_time) for status in statuses}
     vessel_values = {_canonical_text(status.vessel_voyage) for status in statuses}
     if len(eta_values) > 1 or len(vessel_values) > 1:

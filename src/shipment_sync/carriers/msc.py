@@ -397,10 +397,16 @@ def _status_from_payload(
         eta_time, eta_local_text = _derive_eta_from_moves(recent_moves)
 
     vessel_voyage = _extract_vessel_voyage(container, bill)
+    general = bill.get("GeneralTrackingInfo") or {}
+    destination_port = extract_first(container, ["PortOfDischarge", "PodName"])
+    if not destination_port and isinstance(general, dict):
+        destination_port = extract_first(general, ["PortOfDischarge", "PodName"])
 
     if eta_only_mode:
         return ShipmentStatus(
             status_text=_eta_status_text(eta_time),
+            destination_port=destination_port,
+            require_destination_evidence=True,
             eta_time=eta_time,
             eta_local_text=eta_local_text,
             latest_move=latest_move,
@@ -413,6 +419,8 @@ def _status_from_payload(
 
     return ShipmentStatus(
         status_text=(latest_move.name if latest_move else _eta_status_text(eta_time)),
+        destination_port=destination_port,
+        require_destination_evidence=True,
         location=latest_move.location if latest_move else None,
         event_time=latest_move.event_time if latest_move else None,
         eta_time=eta_time,

@@ -19,6 +19,7 @@ class ShipmentRef:
     expected_container_count: int | None = None
     current_field_values: dict[str, Any] = field(default_factory=dict)
     reference_hints: list[str] = field(default_factory=list)
+    destination_port: str | None = None
 
 
 @dataclass
@@ -38,6 +39,8 @@ class ShipmentStatus:
     vessel_voyage: str | None = None
     final_vessel_voyage: str | None = None
     booking_status_text: str | None = None
+    destination_port: str | None = None
+    require_destination_evidence: bool = False
 
 
 @dataclass

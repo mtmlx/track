@@ -277,6 +277,8 @@ def test_import_batch_continues_after_invalid_capture() -> None:
         MscBrowserCapture(
             task_id="good",
             capture="""CONTAINER NUMBER: MSCU7654321
+Port of Discharge
+Charleston, US
 Date
 Location
 Description
@@ -354,6 +356,8 @@ def test_download_import_batch_writes_private_response_to_temporary_file(monkeyp
 
 def _capture(container: str, eta: str, vessel_voyage: str) -> str:
     return f"""CONTAINER NUMBER: {container}
+Port of Discharge
+Miami, US
 POD ETA
 {eta}
 Date
