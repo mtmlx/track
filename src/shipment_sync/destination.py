@@ -11,6 +11,17 @@ def _normalize(value: str) -> str:
 
 
 _ALIASES = {
+    "uschs": "charleston us",
+    "charleston": "charleston us",
+    "charleston sc": "charleston us",
+    "uslgb": "long beach us",
+    "long beach": "long beach us",
+    "long beach ca": "long beach us",
+    "usmia": "miami us",
+    "miami": "miami us",
+    "miami fl": "miami us",
+    "usmkc": "kansas city us",
+    "kansas city": "kansas city us",
     "gtprq": "puerto quetzal gt",
     "puerto quetzal": "puerto quetzal gt",
     "puerto quetzal guatemala": "puerto quetzal gt",
