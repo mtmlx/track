@@ -11,6 +11,10 @@ def _normalize(value: str) -> str:
 
 
 _ALIASES = {
+    "gtprq": "puerto quetzal gt",
+    "puerto quetzal": "puerto quetzal gt",
+    "puerto quetzal guatemala": "puerto quetzal gt",
+    "puerto quetzal gt": "puerto quetzal gt",
     "hnpcr": "puerto cortes hn",
     "puerto cortes": "puerto cortes hn",
     "puerto cortes honduras": "puerto cortes hn",

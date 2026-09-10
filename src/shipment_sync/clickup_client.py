@@ -1433,6 +1433,7 @@ def _derive_operational_status_step(
     if gate_in_empty_date is not None and gate_in_empty_date <= today and (
         target_step is not None and _workflow_step_order(target_step) >= _workflow_step_order("en_route_warehouse")
         or _workflow_step_order(current_step) >= _workflow_step_order("en_route_warehouse")
+        or _has_verified_one_empty_return(shipment, status, now_utc)
     ):
         target_step = _max_workflow_step(target_step, "empty_returned")
 
@@ -1768,7 +1769,34 @@ def _is_destination_discharge(status: ShipmentStatus, move: MovementEvent) -> bo
         and move.event_time is not None
         and move.event_time.tzinfo is not None
         and move.event_time <= datetime.now(timezone.utc)
-        and same_port(status.destination_port, move.location)
+        and _move_at_destination(status, move)
+    )
+
+
+def _move_at_destination(status: ShipmentStatus, move: MovementEvent) -> bool:
+    # A carrier port code takes precedence over display labels; conflicting
+    # codes must not be rescued by a matching display name.
+    return same_port(status.destination_port, move.location_code or move.location)
+
+
+def _has_verified_one_empty_return(
+    shipment: ShipmentRef, status: ShipmentStatus, now_utc: datetime,
+) -> bool:
+    if shipment.shipping_line.strip().lower() != "one" or not status.require_destination_evidence:
+        return False
+    moves = _order_moves_ascending(status.recent_moves)
+    discharge_index = _validated_destination_discharge_index(status, moves)
+    if discharge_index is None:
+        return False
+    return any(
+        move.source_event_name == "Empty Container Returned from Customer"
+        and _event_code_from_move(move) == "GTIN"
+        and move.event_state == "actual"
+        and move.event_time is not None
+        and move.event_time.tzinfo is not None
+        and move.event_time <= now_utc
+        and _move_at_destination(status, move)
+        for move in moves[discharge_index + 1:]
     )
 
 

@@ -51,6 +51,8 @@ class MovementEvent:
     event_time_local_text: str | None = None
     event_state: str | None = None
     vessel_voyage: str | None = None
+    source_event_name: str | None = None
+    location_code: str | None = None
 
 
 @dataclass
