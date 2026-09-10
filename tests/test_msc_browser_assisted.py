@@ -11,6 +11,7 @@ from shipment_sync.msc_browser_assisted import (
     status_from_browser_capture,
 )
 from shipment_sync.msc_browser_assisted import MscBrowserCapture
+from shipment_sync.msc_browser_assisted import validate_browser_journey
 from shipment_sync.msc_browser_assisted_main import _download_import_batch, _import_batch
 
 
@@ -217,6 +218,7 @@ def test_consolidate_browser_statuses_requires_all_known_containers() -> None:
 
 def test_consolidate_browser_statuses_rejects_inconsistent_shipment_facts() -> None:
     shipment = ShipmentRef("task-1", "MSC shipment", "MSC", "BOOK-1", "MSCU1234567, MSCU7654321", "list-1")
+    shipment.destination_port = "Miami"
     first = status_from_browser_capture(_capture("MSCU1234567", "19/09/2026", "ANTWERP 81W"))
     second = status_from_browser_capture(_capture("MSCU7654321", "20/09/2026", "ANTWERP 81W"))
 
@@ -224,22 +226,23 @@ def test_consolidate_browser_statuses_rejects_inconsistent_shipment_facts() -> N
         consolidate_browser_statuses(
             shipment,
             [
-                (MscBrowserCapture("task-1", "", "MSCU1234567"), first),
-                (MscBrowserCapture("task-1", "", "MSCU7654321"), second),
+                (MscBrowserCapture("task-1", _capture("MSCU1234567", "19/09/2026", "ANTWERP 81W"), "MSCU1234567"), first),
+                (MscBrowserCapture("task-1", _capture("MSCU7654321", "20/09/2026", "ANTWERP 81W"), "MSCU7654321"), second),
             ],
         )
 
 
 def test_consolidate_browser_statuses_merges_consistent_container_results() -> None:
     shipment = ShipmentRef("task-1", "MSC shipment", "MSC", "BOOK-1", "MSCU1234567, MSCU7654321", "list-1")
+    shipment.destination_port = "Miami"
     first = status_from_browser_capture(_capture("MSCU1234567", "19/09/2026", "ANTWERP 81W"))
     second = status_from_browser_capture(_capture("MSCU7654321", "19/09/2026", "ANTWERP 81W"))
 
     status = consolidate_browser_statuses(
         shipment,
         [
-            (MscBrowserCapture("task-1", "", "MSCU1234567"), first),
-            (MscBrowserCapture("task-1", "", "MSCU7654321"), second),
+            (MscBrowserCapture("task-1", _capture("MSCU1234567", "19/09/2026", "ANTWERP 81W"), "MSCU1234567"), first),
+            (MscBrowserCapture("task-1", _capture("MSCU7654321", "19/09/2026", "ANTWERP 81W"), "MSCU7654321"), second),
         ],
     )
 
@@ -270,13 +273,14 @@ def test_import_batch_continues_after_invalid_capture() -> None:
 
     shipments = [
         ShipmentRef("bad", "Bad", "msc", "BOOK-BAD", None, "list-1"),
-        ShipmentRef("good", "Good", "msc", "BOOK-GOOD", None, "list-1"),
+        ShipmentRef("good", "Good", "msc", "BOOK-GOOD", None, "list-1", destination_port="Charleston"),
     ]
     captures = [
         MscBrowserCapture(task_id="bad", capture="CONTAINER NUMBER: MSCU1234567"),
         MscBrowserCapture(
             task_id="good",
-            capture="""CONTAINER NUMBER: MSCU7654321
+            capture="""BOOKING NUMBER: BOOK-GOOD 1 Bill of Lading found
+CONTAINER NUMBER: MSCU7654321
 Port of Discharge
 Charleston, US
 Date
@@ -322,6 +326,7 @@ def test_import_batch_projects_one_consistent_result_for_all_containers() -> Non
         "BOOK-1",
         "MSCU1234567, MSCU7654321",
         "list-1",
+        destination_port="Miami",
     )
     captures = [
         MscBrowserCapture("task-1", _capture("MSCU1234567", "19/09/2026", "ANTWERP 81W"), "MSCU1234567"),
@@ -355,7 +360,8 @@ def test_download_import_batch_writes_private_response_to_temporary_file(monkeyp
 
 
 def _capture(container: str, eta: str, vessel_voyage: str) -> str:
-    return f"""CONTAINER NUMBER: {container}
+    return f"""BOOKING NUMBER: BOOK-1 1 Bill of Lading found
+CONTAINER NUMBER: {container}
 Port of Discharge
 Miami, US
 POD ETA
@@ -371,3 +377,86 @@ Estimated Time of Arrival
 {vessel_voyage}
 Pomtoc Terminal
 """
+
+
+@pytest.mark.parametrize("destination", ["Charleston", "USCHS", "Charleston, US"])
+def test_booking_journey_accepts_destination_aliases(destination):
+    shipment = ShipmentRef("9748", "9748", "msc", "177WGSGSN7A192A", "TRHU8012033", "list", destination_port=destination)
+    capture = MscBrowserCapture("9748", "BOOKING NUMBER: 177WGSGSN7A192A 1 Bill of Lading found\nContainer\nTRHU8012033\nPort of Discharge\nCharleston, US\nShipped To\nCharleston, US")
+    validate_browser_journey(shipment, capture)
+
+
+@pytest.mark.parametrize("destination", [None, "KANSAS, USA", "Charleston / Antwerp", "Antwerp, BE"])
+def test_booking_journey_rejects_unknown_or_conflicting_destination(destination):
+    shipment = ShipmentRef("9748", "9748", "msc", "177WGSGSN7A192A", "TRHU8012033", "list", destination_port=destination)
+    capture = MscBrowserCapture("9748", "BOOKING NUMBER: 177WGSGSN7A192A\nContainer\nTRHU8012033\nPort of Discharge\nCharleston, US")
+    with pytest.raises(ValueError, match="shipment destination"):
+        validate_browser_journey(shipment, capture)
+
+
+def test_inland_destination_is_not_required_to_equal_discharge_port():
+    shipment = ShipmentRef("s", "s", "msc", "BOOK-1", "MSCU1234567", "list", destination_port="Kansas City")
+    capture = MscBrowserCapture("s", "BOOKING NUMBER: BOOK-1\nContainer\nMSCU1234567\nPort of Discharge\nLong Beach, US\nShipped To\nKansas City, US")
+    validate_browser_journey(shipment, capture)
+
+
+@pytest.mark.parametrize("header", ["CONTAINER NUMBER: TRHU8012033", "BOOKING NUMBER: ANOTHER", "BOOKING NUMBER: 177WGSGSN7A192AX"])
+def test_reused_container_cannot_supply_another_journey(header):
+    shipment = ShipmentRef("9748", "9748", "msc", "177WGSGSN7A192A", "TRHU8012033", "list", destination_port="Charleston")
+    capture = MscBrowserCapture("9748", header + "\nContainer\nTRHU8012033\nPort of Discharge\nAntwerp, BE")
+    for _ in range(2):
+        with pytest.raises(ValueError, match="visible booking/BL"):
+            validate_browser_journey(shipment, capture)
+
+
+def test_matching_mbl_header_is_accepted():
+    shipment = ShipmentRef("s", "s", "msc", "MEDUAAH59944", "TRHU8012033", "list", destination_port="Charleston")
+    validate_browser_journey(shipment, MscBrowserCapture("s", "Bill of Lading:\nMEDUAAH59944\nContainer\nTRHU8012033\nPort of Discharge\nCharleston, US"))
+
+
+def test_combined_container_histories_are_rejected():
+    shipment = ShipmentRef("s", "s", "msc", "BOOK-1", "MSCU1234567", "list", destination_port="Miami")
+    with pytest.raises(ValueError, match="isolated container"):
+        validate_browser_journey(shipment, MscBrowserCapture("s", _capture("MSCU1234567", "19/09/2026", "SHIP 1E") + "\nMSCU7654321"))
+
+
+def test_invalid_journey_never_reaches_write_planner_even_on_repeat():
+    class NoWrites:
+        def plan_shipment_update(self, *args):
+            raise AssertionError("Unsafe capture reached planner")
+        def report_msc_container_review_issue(self, shipment, *, error):
+            assert "visible booking/BL" in error
+            return True
+    shipment = ShipmentRef("s", "s", "msc", "BOOK-1", "MSCU1234567", "list", destination_port="Miami")
+    capture = MscBrowserCapture("s", _capture("MSCU1234567", "19/09/2026", "SHIP 1E").replace("BOOK-1", "OTHER"))
+    for _ in range(2):
+        _import_batch(NoWrites(), [shipment], [capture], [], apply=True)
+
+
+def test_report_retains_rejection_and_skips_newly_ineligible_task(tmp_path):
+    path = tmp_path / "progress.jsonl"
+    shipment = ShipmentRef("s", "s", "msc", "BOOK-1", "MSCU1234567", "list", destination_port="Miami")
+    bad = MscBrowserCapture("s", _capture("MSCU1234567", "19/09/2026", "SHIP 1E").replace("BOOK-1", "OTHER"))
+    missing = MscBrowserCapture("closed", bad.capture)
+    _import_batch(object(), [shipment], [bad, missing], [], apply=False, report_path=path)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [(x['task_id'], x['outcome']) for x in rows] == [('closed', 'ineligible'), ('s', 'rejected')]
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_uncertain_write_is_reported_without_retry(tmp_path):
+    import requests
+    class Client:
+        calls = 0
+        def plan_shipment_update(self, shipment, status):
+            return ShipmentUpdatePlan(True, "status", "hash")
+        def update_shipment_status(self, shipment, status):
+            self.calls += 1
+            raise requests.Timeout('sensitive transport details not logged')
+    client = Client()
+    shipment = ShipmentRef("s", "s", "msc", "BOOK-1", "MSCU1234567", "list", destination_port="Miami")
+    capture = MscBrowserCapture("s", _capture("MSCU1234567", "19/09/2026", "SHIP 1E"))
+    path = tmp_path / 'progress.jsonl'
+    _import_batch(client, [shipment], [capture], [], apply=True, report_path=path)
+    assert client.calls == 1
+    assert [json.loads(x)['outcome'] for x in path.read_text().splitlines()] == ['write_started', 'write_uncertain']
