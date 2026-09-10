@@ -34,7 +34,7 @@ RUN set -eux; \
     done; \
     sed '/^#/d' /app/requirements-os.lock | xargs apt-get install --only-upgrade --no-install-recommends -y && \
     apt-get install --no-install-recommends -y \
-        python3.14-venv=3.14.4-1ubuntu0.1 \
+        python3.14-venv=3.14.4-1ubuntu0.2 \
         python3-pip-whl=25.1.1+dfsg-1ubuntu2 \
         python3-setuptools-whl=78.1.1-0.1build1 && \
     rm -rf /var/lib/apt/lists/* && \
