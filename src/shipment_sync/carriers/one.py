@@ -59,7 +59,8 @@ class OneAdapter(CarrierAdapter):
                 preferred_container_no=preferred_container_no,
             )
             if edh_status is not None:
-                return edh_status
+                return replace(edh_status, destination_port=shipment.destination_port,
+                               require_destination_evidence=True)
 
         payload, source = self._fetch_payload(reference, ref_type_code)
         discovered_containers = extract_container_numbers(payload)
@@ -332,6 +333,8 @@ class OneAdapter(CarrierAdapter):
                     event_time_local_text=local_time_text,
                     event_state=event_state,
                     vessel_voyage=_extract_one_event_vessel_voyage(event),
+                    source_event_name=event_name,
+                    location_code=_safe_text(location_obj.get("code")),
                 )
             )
 
