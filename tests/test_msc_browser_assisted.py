@@ -80,6 +80,34 @@ Gangji Terminal (Phase Iv)
     assert status.discovered_containers == ["TRHU5066421"]
     assert not status.container_discovery_authoritative
     assert any(move.name == "Container Loaded (LOAD)" for move in status.recent_moves)
+    loaded = next(move for move in status.recent_moves if move.name == "Container Loaded (LOAD)")
+    assert loaded.vessel_voyage == "MSC YOKOHAMA GY631A"
+    discharged = next(move for move in status.recent_moves if move.name == "Container Discharged (DISC)")
+    assert discharged.vessel_voyage == "MSC YOKOHAMA GY631A"
+
+
+def test_browser_actual_vessel_survives_without_pod_eta() -> None:
+    status = status_from_browser_capture("""CONTAINER NUMBER: MSMU7242018
+25/08/2026
+Port Everglades, US
+Empty received at CY
+EMPTY
+14/08/2026
+Miami, US
+Import Discharged from Vessel
+MSC RANIA VIII NH631R
+04/07/2026
+Ningbo, CN
+Export Loaded on Vessel
+MSC RANIA VIII GN625E
+30/06/2026
+Ningbo, CN
+Export received at CY
+LADEN
+""")
+    assert [m.vessel_voyage for m in status.recent_moves] == [
+        None, "MSC RANIA VIII NH631R", "MSC RANIA VIII GN625E", None
+    ]
 
 
 def test_browser_capture_without_pod_eta_uses_actual_movement_history() -> None:

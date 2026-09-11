@@ -1473,7 +1473,11 @@ def _effective_vessel_voyage(
         return "BARGE"
 
     current_vessel_voyage = _field_string(settings.cf_vessel_voyage, field_values)
-    actual_event_vessel_voyage = _latest_actual_event_vessel_voyage(status, now_utc=now_utc)
+    actual_event_vessel_voyage = _latest_actual_event_vessel_voyage(
+        status, now_utc=now_utc,
+        include_discharge=(shipment.shipping_line or "").strip().lower()
+        in {"msc", "msc shipping line", "mediterranean shipping company"},
+    )
     # Do not replace an active feeder-leg marker with a planned final vessel.
     # It advances only when a later vessel-bearing event is actually reported.
     if current_vessel_voyage and current_vessel_voyage.upper() == "BARGE":
@@ -1493,13 +1497,24 @@ def _effective_vessel_voyage(
     return (status.vessel_voyage or "").strip() or None
 
 
-def _latest_actual_event_vessel_voyage(status: ShipmentStatus, *, now_utc: datetime) -> str | None:
+def _latest_actual_event_vessel_voyage(
+    status: ShipmentStatus, *, now_utc: datetime, include_discharge: bool = False
+) -> str | None:
+    codes = {"LOAD", "DEPA", "ARRI"} | ({"DISC"} if include_discharge else set())
     candidates = [
         move
         for move in status.recent_moves
-        if _event_code_from_move(move) in {"LOAD", "DEPA", "ARRI"}
+        if _event_code_from_move(move) in codes
         and (move.vessel_voyage or "").strip()
         and _move_is_effectively_actual(move, now_utc=now_utc)
+        and (not include_discharge or (
+            _move_is_actual(move)
+            and _move_event_date(move) is not None
+            and _move_event_date(move) <= now_utc.date()
+            and (move.event_time is None or move.event_time <= now_utc)
+            and (move.vessel_voyage or "").strip().upper()
+            not in {"EMPTY", "LADEN", "N/A", "N.A", "---"}
+        ))
     ]
     if not candidates:
         return None
