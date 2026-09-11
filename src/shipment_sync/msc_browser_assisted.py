@@ -370,6 +370,17 @@ def _capture_events(lines: list[str]) -> list[dict[str, str]]:
         }
         if vessel_voyage and not _looks_like_event_description(vessel_voyage) and not _DATE_RE.fullmatch(vessel_voyage):
             event["VesselVoyage"] = vessel_voyage
+            # The shared MSC event parser consumes separate vessel/voyage keys.
+            # EMPTY/LADEN describe equipment state, not a transport vessel.
+            if vessel_voyage.upper() not in {"EMPTY", "LADEN", "N.A", "N/A", "---"} and any(
+                marker in description.casefold()
+                for marker in ("loaded", "discharged", "arrival", "departure")
+            ):
+                vessel, voyage = _split_vessel_voyage(vessel_voyage)
+                if vessel:
+                    event["VesselName"] = vessel
+                if voyage:
+                    event["Voyage"] = voyage
         events.append(event)
     return events
 

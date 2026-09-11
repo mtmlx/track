@@ -823,6 +823,53 @@ def test_plan_shipment_update_replaces_barge_with_latest_actual_mother_vessel() 
     assert updates["Vessel/Voyage"].value == "MSC MOTHER 123E"
 
 
+def test_msc_transshipment_discharge_updates_voyage_without_destination_arrival() -> None:
+    client = ClickUpClient(_settings(cf_vessel_voyage="vessel-field"))
+    shipment = ShipmentRef(
+        task_id="msc-discharge", task_name="MSC", shipping_line="msc",
+        booking_no="BOOK", container_no="CONT", list_id="list-1",
+        destination_port="Puerto Cortes", current_task_status="transito",
+        current_field_values={"vessel-field": "BARGE"},
+    )
+    status = ShipmentStatus(
+        status_text="In transit", destination_port="Puerto Cortes",
+        require_destination_evidence=True,
+        recent_moves=[
+            MovementEvent(name="Container Loaded (LOAD)", event_time=_days_from_now(-8),
+                          event_state="actual", location="Ningbo", vessel_voyage="MSC RANIA VIII GN625E"),
+            MovementEvent(name="Container Discharged (DISC)", event_time=_days_from_now(-2),
+                          event_state="actual", location="Colon", vessel_voyage="MSC RANIA VIII NH631R"),
+        ],
+    )
+    plan = client.plan_shipment_update(shipment, status)
+    fields = {f.field_id: f.value for f in plan.custom_field_updates}
+    assert fields["vessel-field"] == "MSC RANIA VIII NH631R"
+    assert "disc-field" not in fields
+    assert plan.task_status_update is None
+    shipment.current_field_values.update(fields)
+    repeat = client.plan_shipment_update(shipment, status)
+    assert not any(f.field_id in {"vessel-field", "disc-field"} for f in repeat.custom_field_updates)
+
+
+def test_msc_latest_vessel_rejects_unconfirmed_future_and_equipment_labels() -> None:
+    from shipment_sync.clickup_client import _latest_actual_event_vessel_voyage
+    now = datetime.now(timezone.utc)
+    good = MovementEvent(name="Container Loaded (LOAD)", event_time=now-timedelta(days=8),
+                         event_state="actual", vessel_voyage="MSC VALID 1E")
+    for state, when, vessel in [
+        ("estimated", now-timedelta(days=1), "MSC BAD 2E"),
+        (None, now-timedelta(days=1), "MSC BAD 2E"),
+        ("actual", None, "MSC BAD 2E"),
+        ("actual", now+timedelta(days=1), "MSC BAD 2E"),
+        ("actual", now-timedelta(days=1), "EMPTY"),
+        ("actual", now-timedelta(days=1), "LADEN"),
+    ]:
+        bad = MovementEvent(name="Container Discharged (DISC)", event_time=when,
+                            event_state=state, vessel_voyage=vessel)
+        status = ShipmentStatus(status_text="Transit", recent_moves=[bad, good])
+        assert _latest_actual_event_vessel_voyage(status, now_utc=now, include_discharge=True) == "MSC VALID 1E"
+
+
 def test_plan_shipment_update_does_not_label_normal_one_ocean_leg_as_barge() -> None:
     client = ClickUpClient(_settings(cf_vessel_voyage="vessel-voyage-field"))
     shipment = ShipmentRef(
