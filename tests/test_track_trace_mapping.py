@@ -60,6 +60,7 @@ def test_plan_shipment_update_maps_origin_and_destination_events_to_fields() -> 
         booking_no="BOOK-1",
         container_no="CONT-1",
         list_id="list-1",
+        destination_port="GTPRQ",
     )
     status = ShipmentStatus(
         status_text="In transit",
@@ -1290,7 +1291,7 @@ def test_plan_shipment_update_skips_estimated_destination_dates() -> None:
     assert "Gate in empty" not in updates
 
 
-def test_plan_shipment_update_clears_estimated_destination_dates_already_in_clickup() -> None:
+def test_plan_shipment_update_preserves_historical_dates_without_actual_destination_evidence() -> None:
     client = ClickUpClient(_settings())
 
     def ms(year: int, month: int, day: int) -> str:
@@ -1337,9 +1338,9 @@ def test_plan_shipment_update_clears_estimated_destination_dates_already_in_clic
 
     updates = {update.label: update for update in plan.custom_field_updates}
     assert plan.changed is True
-    assert updates["Discharge date"].value is None
-    assert updates["Gate out delivery"].value is None
-    assert updates["Gate in empty"].value is None
+    assert "Discharge date" not in updates
+    assert "Gate out delivery" not in updates
+    assert "Gate in empty" not in updates
 
 
 def test_plan_shipment_update_only_refreshes_last_checked_when_all_values_match() -> None:
