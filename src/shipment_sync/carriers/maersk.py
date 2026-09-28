@@ -885,6 +885,7 @@ def _event_to_movement(event: dict) -> MovementEvent:
         or extract_first(event, ["timestamp"])
     )
     classifier = _event_classifier(event)
+    location_code = _event_location_code(event)
     return MovementEvent(
         name=name,
         location=location,
@@ -892,7 +893,25 @@ def _event_to_movement(event: dict) -> MovementEvent:
         event_time_local_text=local_time_text,
         event_state=_normalize_event_state(classifier),
         vessel_voyage=extract_event_vessel_voyage(event),
+        location_code=location_code,
     )
+
+
+def _event_location_code(event: dict) -> str | None:
+    # Use event locations, never arbitrary nested itinerary/vessel locations.
+    locations = [event, event.get("eventLocation")]
+    transport_call = event.get("transportCall")
+    if isinstance(transport_call, dict):
+        locations.extend([transport_call, transport_call.get("location")])
+    codes = {
+        str(location[key]).strip().upper()
+        for location in locations if isinstance(location, dict)
+        for key in ("UNLocationCode", "unLocationCode")
+        if location.get(key)
+    }
+    if len(codes) > 1:
+        return "AMBIGUOUS"
+    return next(iter(codes), None)
 
 
 def _latest_estimated_transport_arrival(events: list[dict]) -> dict | None:
