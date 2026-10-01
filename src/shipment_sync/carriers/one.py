@@ -28,6 +28,8 @@ from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
 
 class OneAdapter(CarrierAdapter):
     def __init__(self) -> None:
+        self.use_dcsa_api = _env_bool('ONE_DCSA_ENABLED', default=False)
+        self.dcsa_client = None
         self.eta_only_mode = _env_bool("SHIPMENT_ETA_ONLY", default=True)
         self.use_edh_api = _env_bool("ONE_USE_EDH_API", default=True)
         self.edh_base_url = os.getenv("ONE_EDH_BASE_URL", "https://ecomm.one-line.com/api/v1/edh").strip().rstrip("/")
@@ -45,6 +47,11 @@ class OneAdapter(CarrierAdapter):
         self.session = requests.Session()
 
     def fetch_status(self, shipment: ShipmentRef) -> ShipmentStatus:
+        if self.use_dcsa_api:
+            from shipment_sync.carriers.one_dcsa import OneDcsaClient
+            if self.dcsa_client is None:
+                self.dcsa_client = OneDcsaClient()
+            return self.dcsa_client.fetch_status(shipment)
         reference, ref_type_code, preferred_container_no = _pick_search_reference(
             shipment,
             self.booking_type_code,
