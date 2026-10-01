@@ -1,3 +1,4 @@
+# Superseded pins refreshed from signed Ubuntu amd64 indexes on 2026-10-01.
 # Ubuntu 26.04 updates verified from signed distribution indexes on 2026-09-07.
 # curl/glibc pins refreshed from Ubuntu updates/security indexes on 2026-09-10.
 # Python runtime/venv pins refreshed together on 2026-09-10.
@@ -14,7 +15,7 @@ gnu-coreutils=9.7-3ubuntu2.1
 gpg=2.4.8-4ubuntu3.1
 gpgconf=2.4.8-4ubuntu3.1
 gpgv=2.4.8-4ubuntu3.1
-gstreamer1.0-plugins-good=1.28.2-2ubuntu0.3
+gstreamer1.0-plugins-good=1.28.2-2ubuntu0.4
 gstreamer1.0-plugins-base=1.28.2-1ubuntu0.1
 gzip=1.14-1~exp2ubuntu1.1
 krb5-locales=1.22.1-2ubuntu4.1
@@ -36,7 +37,7 @@ libc6=2.43-2ubuntu2.4
 libcurl3t64-gnutls=8.18.0-1ubuntu2.7
 libcurl4t64=8.18.0-1ubuntu2.7
 libegl-mesa0=26.0.8-1ubuntu0.3
-libevent-2.1-7t64=2.1.12-stable-10ubuntu0.1
+libevent-2.1-7t64=2.1.12-stable-10ubuntu0.2
 libexpat1=2.7.4-1ubuntu0.2
 libfreetype6=2.14.2+dfsg-1ubuntu0.1
 libgbm1=26.0.8-1ubuntu0.3
@@ -47,8 +48,8 @@ libglib2.0-0t64=2.88.0-1ubuntu0.1
 libgstreamer-gl1.0-0=1.28.2-1ubuntu0.1
 libgstreamer-plugins-base1.0-0=1.28.2-1ubuntu0.1
 libgssapi-krb5-2=1.22.1-2ubuntu4.1
-libheif-plugin-aomdec=1.21.2-3ubuntu0.5
-libheif1=1.21.2-3ubuntu0.5
+libheif-plugin-aomdec=1.21.2-3ubuntu0.6
+libheif1=1.21.2-3ubuntu0.6
 libk5crypto3=1.22.1-2ubuntu4.1
 libkrb5-3=1.22.1-2ubuntu4.1
 libkrb5support0=1.22.1-2ubuntu4.1
@@ -71,7 +72,7 @@ libspa-0.2-modules=1.6.2-1ubuntu1.1
 libsqlite3-0=3.46.1-9ubuntu0.2
 libssh-4=0.11.3-1ubuntu2.1
 libssh2-1t64=1.11.1-1ubuntu0.26.04.4
-libssl3t64=3.5.5-1ubuntu3.5
+libssl3t64=3.5.5-1ubuntu3.7
 libsystemd-shared=259.5-0ubuntu3.4
 libsystemd0=259.5-0ubuntu3.4
 libtiff6=4.7.0-3ubuntu5
@@ -84,8 +85,8 @@ login=1:4.16.0-2+really2.41.3-3ubuntu2.2
 mesa-libgallium=26.0.8-1ubuntu0.3
 mount=2.41.3-3ubuntu2.2
 openssh-client=1:10.2p1-2ubuntu3.6
-openssl=3.5.5-1ubuntu3.5
-openssl-provider-legacy=3.5.5-1ubuntu3.5
+openssl=3.5.5-1ubuntu3.7
+openssl-provider-legacy=3.5.5-1ubuntu3.7
 perl=5.40.1-7ubuntu0.3
 perl-base=5.40.1-7ubuntu0.3
 perl-modules-5.40=5.40.1-7ubuntu0.3
