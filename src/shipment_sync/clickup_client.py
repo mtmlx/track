@@ -1076,6 +1076,10 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
         )
 
     ordered_moves = _order_moves_ascending(status.recent_moves)
+    if status.raw_source == "https://apix.one-line.com/v2/events":
+        # DCSA forecasts belong in ETA/timeline, never actual gate/ETD fields.
+        now_utc = datetime.now(timezone.utc)
+        ordered_moves = [m for m in ordered_moves if _move_is_effectively_actual(m, now_utc=now_utc)]
     if not ordered_moves:
         return updates
 
@@ -1368,6 +1372,21 @@ def _derive_operational_status_step(
     gate_in_empty_date = _field_date(settings.cf_gate_in_empty, field_values)
     discharge_date = _field_date(settings.cf_discharge_date, field_values)
 
+    strict_one_origin = status.raw_source == "https://apix.one-line.com/v2/events"
+    actual_origin_codes = set()
+    if strict_one_origin:
+        actual_origin_codes = {
+            _event_code_from_move(move) for move in status.recent_moves
+            if _move_is_effectively_actual(move, now_utc=now_utc)
+        }
+        # Persisted planned dates alone cannot prove a physical origin milestone.
+        if "GTOT" not in actual_origin_codes:
+            gate_out_empty_date = None
+        if "GTIN" not in actual_origin_codes:
+            gate_in_full_date = None
+        if "DEPA" not in actual_origin_codes:
+            etd_date = None
+
     target_step: str | None = None
 
     if (
@@ -1391,6 +1410,11 @@ def _derive_operational_status_step(
         current_step=current_step,
     ):
         target_step = _max_workflow_step(target_step, "in_transit")
+
+    if strict_one_origin and "DEPA" in actual_origin_codes and eta_date is not None and eta_date > today:
+        target_step = _max_workflow_step(target_step, "in_transit")
+        if 5 <= (eta_date - today).days <= 10:
+            target_step = _max_workflow_step(target_step, "arriving")
 
     if gate_out_empty_date is not None and gate_in_full_date is None:
         target_step = _max_workflow_step(target_step, "collected")
