@@ -110,3 +110,15 @@ def test_preflight_uses_only_new_domain_when_enabled(monkeypatch):
     assert _preflight_hosts_for_line('one') == ['apix.one-line.com']
     monkeypatch.setenv('ONE_DCSA_ENABLED', 'false')
     assert _preflight_hosts_for_line('one') == ['ecomm.one-line.com']
+
+
+def test_estimated_origin_events_do_not_write_actual_fields_or_advance_status(monkeypatch):
+    from test_track_trace_mapping import _settings
+    forecasts=[event('gate-out','GTOT','TWKEL','EST',-4),event('gate-in','GTIN','TWKEL','EST',-3),event('depart','DEPA','TWKEL','EST',-2),event('arrive','ARRI','GTPRQ','EST',12)]
+    c=client(monkeypatch,[(forecasts,{})]);s=shipment(current_task_status='pendiente de booking')
+    s.current_field_values={'gtot-empty-field':datetime.now(timezone.utc)-timedelta(days=4),'gtin-full-field':datetime.now(timezone.utc)-timedelta(days=3),'etd-field':datetime.now(timezone.utc)-timedelta(days=2)}
+    status=c.fetch_status(s)
+    plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(s,status)
+    fields={f.field_id for f in plan.custom_field_updates}
+    assert not fields.intersection({'gtot-empty-field','gtin-full-field','etd-field'})
+    assert plan.task_status_update is None
