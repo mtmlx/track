@@ -593,6 +593,8 @@ def _preflight_hosts_for_line(line_name: str) -> list[str]:
     hosts: list[str] = []
 
     if normalized in {"one", "ocean network express"}:
+        if _env_bool("ONE_DCSA_ENABLED", False):
+            return ["apix.one-line.com"]
         one_use_edh = _env_bool("ONE_USE_EDH_API", True)
         one_template = os.getenv("ONE_TRACKING_URL_TEMPLATE", "").strip()
         one_api_url = os.getenv("ONE_TRACKING_API_URL", "").strip()

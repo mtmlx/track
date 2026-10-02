@@ -33,6 +33,8 @@ def test_actual_vs_estimated_destination_and_final_vessel(monkeypatch):
     assert status.latest_move.event_state=='actual' and status.latest_move.location_code=='MXZLO'
     assert status.eta_time>datetime.now(timezone.utc)
     assert status.final_vessel_voyage=='FINAL SHIP 001E'
+    assert status.raw_source=='https://apix.one-line.com/v2/events'
+    assert status.source_url=='https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam=ONEU2154315&trakNoTpCdParam=C'
     plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(shipment(),status)
     assert 'disc-field' not in {f.field_id for f in plan.custom_field_updates}
     assert plan.task_status_update not in ('Arribado en puerto','Vacío devuelto')
@@ -99,3 +101,12 @@ def test_verified_empty_return_remains_destination_bound(monkeypatch):
     status=c.fetch_status(shipment())
     plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(shipment(current_task_status='arribado en puerto'),status)
     assert plan.task_status_update=='Vacío devuelto'
+
+
+def test_preflight_uses_only_new_domain_when_enabled(monkeypatch):
+    from shipment_sync.sync import _preflight_hosts_for_line
+    monkeypatch.setenv('ONE_DCSA_ENABLED', 'true')
+    monkeypatch.setenv('ONE_TRACKING_URL_TEMPLATE', 'https://ecomm.one-line.com/legacy')
+    assert _preflight_hosts_for_line('one') == ['apix.one-line.com']
+    monkeypatch.setenv('ONE_DCSA_ENABLED', 'false')
+    assert _preflight_hosts_for_line('one') == ['ecomm.one-line.com']

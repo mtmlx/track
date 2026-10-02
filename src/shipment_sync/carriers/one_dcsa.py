@@ -162,6 +162,7 @@ class OneDcsaClient:
             eta_time=arrival[1] if arrival else None, eta_local_text=arrival[2] if arrival else None,
             latest_move=latest, recent_moves=moves, discovered_containers=discovered,
             container_discovery_authoritative=bool(requested), raw_source=self.base + '/v2/events',
-            source_url=self.base + '/v2/events', vessel_voyage=arrival[3] if arrival else None,
+            source_url=('https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam=' + discovered[0] + '&trakNoTpCdParam=C') if discovered else None,
+            vessel_voyage=arrival[3] if arrival else None,
             final_vessel_voyage=arrival[3] if arrival else None,
             destination_port=shipment.destination_port, require_destination_evidence=True)
