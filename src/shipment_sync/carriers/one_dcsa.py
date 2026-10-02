@@ -2,6 +2,7 @@
 import os
 import re
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import requests
@@ -113,10 +114,36 @@ class OneDcsaClient:
         return list(unique.values()), containers
 
     def fetch_status(self, shipment: ShipmentRef) -> ShipmentStatus:
-        events, requested = self.events(shipment)
+        references = sorted(set(re.findall(r'\b[A-Z]{4}\d{7}\b', (shipment.container_no or '').upper())))
+        discovery = None
+        if not references or (shipment.expected_container_count and len(references) < shipment.expected_container_count):
+            if not shipment.booking_no:
+                raise ValueError('ONE DCSA needs a booking to discover the missing containers')
+            discovery, _ = self.events(replace(shipment, container_no=None))
+            discovered = _discovered_containers(discovery)
+            if not set(references).issubset(discovered):
+                raise ValueError('ONE DCSA booking does not include the listed containers')
+            references = discovered
+        if not references or len(references) > 20:
+            raise ValueError('ONE DCSA needs between one and twenty validated containers')
+        if shipment.expected_container_count and len(references) != shipment.expected_container_count:
+            raise ValueError('ONE DCSA container population does not match the shipment count')
+        statuses = []
+        for reference in references:
+            scoped = replace(shipment, container_no=reference)
+            events, requested = (discovery, [reference]) if discovery is not None and len(references) == 1 else self.events(scoped)
+            statuses.append(self._map_status(scoped, events, requested))
+        status = statuses[0] if len(statuses) == 1 else _aggregate_statuses(shipment, references, statuses)
+        status.container_discovery_authoritative = bool(shipment.container_no)
+        return status
+
+    def _map_status(self, shipment, events, requested):
         if not events:
             raise ValueError('ONE DCSA returned no events; preserve existing shipment fields')
-        discovered = sorted({ref for e in events for ref in ([e.get('equipmentReference')] + [r.get('referenceValue') for r in e.get('references', []) if r.get('referenceType') == 'EQ']) if ref and re.fullmatch(r'[A-Z]{4}\d{7}', ref)})
+        discovered = _discovered_containers(events)
+        if requested and discovered and discovered != requested:
+            raise ValueError('ONE DCSA mapped an unexpected container population')
+        discovered = discovered or requested
         # Booking-wide movements must not be projected onto an arbitrary container.
         if not requested and len(discovered) != 1:
             raise ValueError('ONE DCSA booking has multiple/no containers; container-level tracking required')
@@ -150,7 +177,8 @@ class OneDcsaClient:
                 source_name = 'Empty Container Returned from Customer'
             moves.append(MovementEvent(name=name, location=location, event_time=dt,
                 event_time_local_text=raw_time, event_state='actual' if classifier == 'ACT' else 'estimated',
-                vessel_voyage=vv, source_event_name=source_name, location_code=code))
+                vessel_voyage=vv, source_event_name=source_name, location_code=code,
+                equipment_load_state=e.get('emptyIndicatorCode') if e.get('eventType') == 'EQUIPMENT' else None))
             if event_code == 'ARRI' and same_port(shipment.destination_port, code or location):
                 arrivals.append((classifier == 'ACT', dt, raw_time, vv))
         moves.sort(key=lambda m: m.event_time, reverse=True)
@@ -166,3 +194,53 @@ class OneDcsaClient:
             vessel_voyage=arrival[3] if arrival else None,
             final_vessel_voyage=arrival[3] if arrival else None,
             destination_port=shipment.destination_port, require_destination_evidence=True)
+
+
+def _discovered_containers(events):
+    return sorted({ref for e in events for ref in ([e.get('equipmentReference')] + [r.get('referenceValue') for r in e.get('references', []) if r.get('referenceType') == 'EQ']) if ref and re.fullmatch(r'[A-Z]{4}\d{7}', ref)})
+
+
+def _aggregate_statuses(shipment, references, statuses):
+    # A shipment milestone is complete only when every container has actual
+    # evidence for that movement at the same port. Completion is the last date.
+    indexed = []
+    for status in statuses:
+        by_key = {}
+        for move in status.recent_moves:
+            if not move.location_code:
+                continue
+            destination_gate = same_port(shipment.destination_port, move.location_code) and (move.name.endswith('(GTOT)') or move.source_event_name == 'Empty Container Returned from Customer')
+            if destination_gate and not any(
+                prior.event_state == 'actual' and prior.name.endswith('(DISC)')
+                and prior.equipment_load_state == 'LADEN'
+                and same_port(shipment.destination_port, prior.location_code or prior.location)
+                and prior.event_time <= move.event_time for prior in status.recent_moves
+            ):
+                continue
+            key = (move.name, move.location_code, move.source_event_name, move.event_state, move.equipment_load_state)
+            if key not in by_key or move.event_time > by_key[key].event_time:
+                by_key[key] = move
+        indexed.append(by_key)
+    common = set(indexed[0]).intersection(*(set(index) for index in indexed[1:]))
+    moves = []
+    for key in common:
+        evidence = [index[key] for index in indexed]
+        last = max(evidence, key=lambda move: move.event_time)
+        vessels = {move.vessel_voyage for move in evidence}
+        moves.append(replace(last, vessel_voyage=last.vessel_voyage if len(vessels) == 1 else None))
+    moves.sort(key=lambda move: move.event_time, reverse=True)
+    actual = [move for move in moves if move.event_state == 'actual']
+    latest = actual[0] if actual else None
+    eta_status = max(statuses, key=lambda status: status.eta_time) if all(status.eta_time for status in statuses) else None
+    vessels = {status.final_vessel_voyage for status in statuses}
+    final_vessel = next(iter(vessels)) if len(vessels) == 1 else None
+    return ShipmentStatus(status_text=latest.name if latest else 'Awaiting actual ONE event for every container',
+        location=latest.location if latest else None, event_time=latest.event_time if latest else None,
+        eta_time=eta_status.eta_time if eta_status else None,
+        eta_local_text=eta_status.eta_local_text if eta_status else None,
+        latest_move=latest, recent_moves=moves, discovered_containers=references,
+        container_discovery_authoritative=bool(shipment.container_no), raw_source='https://apix.one-line.com/v2/events',
+        source_url=statuses[0].source_url, vessel_voyage=final_vessel,
+        final_vessel_voyage=final_vessel, destination_port=shipment.destination_port,
+        require_destination_evidence=True,
+        movement_details=f'Shipment milestones require matching evidence across all {len(references)} containers.')

@@ -1101,6 +1101,15 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
             or _is_destination_discharge(status, move)
         ]
 
+    if status.raw_source == "https://apix.one-line.com/v2/events":
+        pre_discharge_moves = [move for move in pre_discharge_moves
+            if _event_code_from_move(move) not in {"GTIN", "GTOT"}
+            or (not _move_at_destination(status, move)
+                and move.equipment_load_state == {"GTIN": "LADEN", "GTOT": "EMPTY"}[_event_code_from_move(move)])]
+        post_discharge_moves = [move for move in post_discharge_moves
+            if _event_code_from_move(move) not in {"GTIN", "GTOT"}
+            or (move.equipment_load_state == {"GTIN": "EMPTY", "GTOT": "LADEN"}[_event_code_from_move(move)])]
+
     updates.extend(
         _build_move_field_updates(
             moves=pre_discharge_moves,
@@ -1378,6 +1387,9 @@ def _derive_operational_status_step(
         actual_origin_codes = {
             _event_code_from_move(move) for move in status.recent_moves
             if _move_is_effectively_actual(move, now_utc=now_utc)
+            and (_event_code_from_move(move) not in {"GTIN", "GTOT"}
+                or (not _move_at_destination(status, move)
+                    and move.equipment_load_state == {"GTIN": "LADEN", "GTOT": "EMPTY"}[_event_code_from_move(move)]))
         }
         # Persisted planned dates alone cannot prove a physical origin milestone.
         if "GTOT" not in actual_origin_codes:
@@ -1808,6 +1820,7 @@ def _validated_destination_discharge_index(status: ShipmentStatus, moves: list[M
 def _is_destination_discharge(status: ShipmentStatus, move: MovementEvent) -> bool:
     return (
         _event_code_from_move(move) == "DISC"
+        and (status.raw_source != "https://apix.one-line.com/v2/events" or move.equipment_load_state == "LADEN")
         and (move.event_state or "").strip().lower() == "actual"
         and move.event_time is not None
         and move.event_time.tzinfo is not None
