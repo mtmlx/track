@@ -33,6 +33,8 @@ def test_actual_vs_estimated_destination_and_final_vessel(monkeypatch):
     assert status.latest_move.event_state=='actual' and status.latest_move.location_code=='MXZLO'
     assert status.eta_time>datetime.now(timezone.utc)
     assert status.final_vessel_voyage=='FINAL SHIP 001E'
+    assert status.raw_source=='https://apix.one-line.com/v2/events'
+    assert status.source_url=='https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam=ONEU2154315&trakNoTpCdParam=C'
     plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(shipment(),status)
     assert 'disc-field' not in {f.field_id for f in plan.custom_field_updates}
     assert plan.task_status_update not in ('Arribado en puerto','Vacío devuelto')
