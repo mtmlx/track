@@ -74,10 +74,12 @@ def test_full_page_without_cursor_rejected(monkeypatch):
 
 
 def test_missing_destination_never_sets_eta_or_final_vessel(monkeypatch):
-    c=client(monkeypatch,[([event('1','ARRI','GTPRQ','EST',5)],{})])
+    c=client(monkeypatch,[([event('0','LOAD','TWKEL'),event('1','ARRI','GTPRQ','EST',5)],{})])
     s=shipment();s.destination_port=None
     status=c.fetch_status(s)
     assert status.eta_time is None and status.final_vessel_voyage is None
+    plan=ClickUpClient(_settings(cf_vessel_voyage='vessel-field')).plan_shipment_update(s,status)
+    assert 'vessel-field' not in {f.field_id for f in plan.custom_field_updates}
 
 
 def test_token_cached_and_entitlement_checked(monkeypatch):
@@ -171,9 +173,12 @@ def test_multi_eta_uses_last_arrival_and_vessel_requires_agreement(monkeypatch):
     first=event('a','ARRI','GTPRQ','EST',3)
     second=second_container(event('b','ARRI','GTPRQ','EST',5))[0]
     second['transportCall']={'vessel':{'vesselName':'OTHER SHIP'},'importVoyageNumber':'002E'}
-    status=multi_client(monkeypatch,{'ONEU2154315':[first],'CAAU2475597':[second]}).fetch_status(multi_shipment())
+    rows={'ONEU2154315':[event('a-load','LOAD','TWKEL'),first],'CAAU2475597':second_container(event('b-load','LOAD','TWKEL'))+[second]}
+    status=multi_client(monkeypatch,rows).fetch_status(multi_shipment())
     assert status.eta_time==datetime.fromisoformat(second['eventDateTime'])
-    assert status.final_vessel_voyage is None and status.latest_move is None
+    assert status.final_vessel_voyage is None and status.latest_move.event_state=='actual'
+    plan=ClickUpClient(_settings(cf_vessel_voyage='vessel-field')).plan_shipment_update(multi_shipment(),status)
+    assert 'vessel-field' not in {f.field_id for f in plan.custom_field_updates}
 
 
 def test_multi_missing_destination_eta_preserves_eta(monkeypatch):

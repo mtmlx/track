@@ -1498,6 +1498,10 @@ def _effective_vessel_voyage(
     field_values: dict[str, Any],
     now_utc: datetime,
 ) -> str | None:
+    if status.raw_source == "https://apix.one-line.com/v2/events":
+        # ONE's vessel field is the final destination leg; intermediate legs
+        # remain on their own movements and cannot fill a missing final vessel.
+        return (status.final_vessel_voyage or "").strip() or None
     current_step = _workflow_step_for_status(
         _workflow_status_by_step(settings, shipment),
         shipment.current_task_status or "",
