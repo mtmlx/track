@@ -53,6 +53,7 @@ class MovementEvent:
     vessel_voyage: str | None = None
     source_event_name: str | None = None
     location_code: str | None = None
+    equipment_load_state: str | None = None
 
 
 @dataclass

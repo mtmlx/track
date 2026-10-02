@@ -74,10 +74,12 @@ def test_full_page_without_cursor_rejected(monkeypatch):
 
 
 def test_missing_destination_never_sets_eta_or_final_vessel(monkeypatch):
-    c=client(monkeypatch,[([event('1','ARRI','GTPRQ','EST',5)],{})])
+    c=client(monkeypatch,[([event('0','LOAD','TWKEL'),event('1','ARRI','GTPRQ','EST',5)],{})])
     s=shipment();s.destination_port=None
     status=c.fetch_status(s)
     assert status.eta_time is None and status.final_vessel_voyage is None
+    plan=ClickUpClient(_settings(cf_vessel_voyage='vessel-field')).plan_shipment_update(s,status)
+    assert 'vessel-field' not in {f.field_id for f in plan.custom_field_updates}
 
 
 def test_token_cached_and_entitlement_checked(monkeypatch):
@@ -90,10 +92,15 @@ def test_token_cached_and_entitlement_checked(monkeypatch):
     with pytest.raises(RuntimeError):c._token()
 
 
-def test_booking_multiple_containers_not_projected(monkeypatch):
-    c=client(monkeypatch,[([event('1','LOAD','TWKEL'),{**event('2','LOAD','TWKEL'),'equipmentReference':'CAAU2475597'}],{})])
+def test_booking_multiple_containers_are_fetched_individually(monkeypatch):
+    first=event('1','LOAD','TWKEL')
+    second={**event('2','LOAD','TWKEL'),'equipmentReference':'CAAU2475597'}
+    c=multi_client(monkeypatch,{'ONEU2154315':[first],'CAAU2475597':[second]},[first,second])
     s=shipment();s.container_no=None
-    with pytest.raises(ValueError):c.fetch_status(s)
+    status=c.fetch_status(s)
+    assert status.discovered_containers==['CAAU2475597','ONEU2154315']
+    assert status.latest_move.name=='Container Loaded (LOAD)'
+    assert status.container_discovery_authoritative is False
 
 
 def test_verified_empty_return_remains_destination_bound(monkeypatch):
@@ -121,4 +128,136 @@ def test_estimated_origin_events_do_not_write_actual_fields_or_advance_status(mo
     plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(s,status)
     fields={f.field_id for f in plan.custom_field_updates}
     assert not fields.intersection({'gtot-empty-field','gtin-full-field','etd-field'})
+    assert plan.task_status_update is None
+
+
+def multi_client(monkeypatch, rows, booking_rows=None):
+    c=OneDcsaClient();monkeypatch.setattr(c,'_token',lambda:'token')
+    def request(method,path,**kwargs):
+        reference=kwargs['params'].get('equipmentReference')
+        return (rows[reference] if reference else booking_rows),{}
+    monkeypatch.setattr(c,'_request',request)
+    return c
+
+
+def second_container(*events):
+    return [{**e,'equipmentReference':'CAAU2475597'} for e in events]
+
+
+def multi_shipment():
+    s=shipment(current_task_status='en tránsito')
+    s.container_no='ONEU2154315, CAAU2475597';s.expected_container_count=2
+    return s
+
+
+def test_partial_container_discharge_cannot_complete_shipment(monkeypatch):
+    first=[event('a-load','LOAD','TWKEL',days=-5),event('a-disc','DISC','GTPRQ')]
+    second=second_container(event('b-load','LOAD','TWKEL',days=-4),event('b-disc','DISC','GTPRQ','EST',2))
+    status=multi_client(monkeypatch,{'ONEU2154315':first,'CAAU2475597':second}).fetch_status(multi_shipment())
+    assert status.latest_move.name=='Container Loaded (LOAD)'
+    plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(multi_shipment(),status)
+    assert 'disc-field' not in {f.field_id for f in plan.custom_field_updates}
+    assert plan.task_status_update not in ('Arribado en puerto','Vacío devuelto')
+
+
+def test_complete_container_discharge_uses_last_completion(monkeypatch):
+    first=event('a','DISC','GTPRQ',days=-4);second=second_container(event('b','DISC','GTPRQ',days=-2))[0]
+    status=multi_client(monkeypatch,{'ONEU2154315':[first],'CAAU2475597':[second]}).fetch_status(multi_shipment())
+    assert status.latest_move.event_time==datetime.fromisoformat(second['eventDateTime'])
+    assert status.latest_move.event_state=='actual'
+    plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(multi_shipment(),status)
+    assert 'disc-field' in {f.field_id for f in plan.custom_field_updates}
+
+
+def test_multi_eta_uses_last_arrival_and_vessel_requires_agreement(monkeypatch):
+    first=event('a','ARRI','GTPRQ','EST',3)
+    second=second_container(event('b','ARRI','GTPRQ','EST',5))[0]
+    second['transportCall']={'vessel':{'vesselName':'OTHER SHIP'},'importVoyageNumber':'002E'}
+    rows={'ONEU2154315':[event('a-load','LOAD','TWKEL'),first],'CAAU2475597':second_container(event('b-load','LOAD','TWKEL'))+[second]}
+    status=multi_client(monkeypatch,rows).fetch_status(multi_shipment())
+    assert status.eta_time==datetime.fromisoformat(second['eventDateTime'])
+    assert status.final_vessel_voyage is None and status.latest_move.event_state=='actual'
+    plan=ClickUpClient(_settings(cf_vessel_voyage='vessel-field')).plan_shipment_update(multi_shipment(),status)
+    assert 'vessel-field' not in {f.field_id for f in plan.custom_field_updates}
+
+
+def test_multi_missing_destination_eta_preserves_eta(monkeypatch):
+    c=multi_client(monkeypatch,{'ONEU2154315':[event('a','ARRI','GTPRQ','EST',3)],'CAAU2475597':second_container(event('b','LOAD','TWKEL'))})
+    status=c.fetch_status(multi_shipment())
+    assert status.eta_time is None and status.final_vessel_voyage is None
+
+
+@pytest.mark.parametrize('rows', [[],second_container(event('bad','LOAD','TWKEL'))])
+def test_multi_missing_or_wrong_booking_holds_entire_record(monkeypatch,rows):
+    if rows:rows[0]['documentReferences'][0]['documentReferenceValue']='OTHER'
+    c=multi_client(monkeypatch,{'ONEU2154315':[event('a','LOAD','TWKEL')],'CAAU2475597':rows})
+    with pytest.raises(ValueError):c.fetch_status(multi_shipment())
+
+
+def test_container_population_must_match_declared_count(monkeypatch):
+    c=client(monkeypatch,[]);s=multi_shipment();s.expected_container_count=1
+    with pytest.raises(ValueError,match='population'):c.fetch_status(s)
+
+
+def test_booking_discovery_completes_declared_population(monkeypatch):
+    first=event('a','LOAD','TWKEL');second=second_container(event('b','LOAD','TWKEL'))[0]
+    c=multi_client(monkeypatch,{'ONEU2154315':[first],'CAAU2475597':[second]},[first,second])
+    s=shipment(expected_container_count=2)
+    status=c.fetch_status(s)
+    assert status.discovered_containers==['CAAU2475597','ONEU2154315']
+    assert status.latest_move.name=='Container Loaded (LOAD)'
+
+
+def test_booking_discovery_must_include_original_container(monkeypatch):
+    second=second_container(event('b','LOAD','TWKEL'))[0]
+    c=multi_client(monkeypatch,{},[second]);s=shipment(expected_container_count=2)
+    with pytest.raises(ValueError,match='does not include'):c.fetch_status(s)
+
+
+def test_container_workload_limit(monkeypatch):
+    s=shipment();s.container_no=','.join(f'ONEU{i:07d}' for i in range(21))
+    with pytest.raises(ValueError,match='twenty'):client(monkeypatch,[]).fetch_status(s)
+
+
+def test_multi_empty_return_requires_every_container_after_discharge(monkeypatch):
+    first=[event('a-disc','DISC','GTPRQ',days=-5),event('a-return','GTIN','GTPRQ',empty='EMPTY')]
+    second=second_container(event('b-disc','DISC','GTPRQ',days=-3),event('b-return','GTIN','GTPRQ',days=-4,empty='EMPTY'))
+    c=multi_client(monkeypatch,{'ONEU2154315':first,'CAAU2475597':second})
+    status=c.fetch_status(multi_shipment())
+    assert all(m.source_event_name!='Empty Container Returned from Customer' for m in status.recent_moves)
+    plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(multi_shipment(),status)
+    assert plan.task_status_update!='Vacío devuelto'
+    second[-1]['eventDateTime']=(datetime.now(timezone.utc)-timedelta(days=1)).isoformat()
+    returned=multi_shipment();returned.current_task_status='arribado en puerto'
+    status=c.fetch_status(returned)
+    plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(returned,status)
+    assert plan.task_status_update=='Vacío devuelto'
+
+
+@pytest.mark.parametrize('code,port,empty,field', [
+    ('GTIN','TWKEL','EMPTY','gtin-full-field'),
+    ('GTOT','TWKEL','LADEN','gtot-empty-field'),
+    ('GTIN','GTPRQ','LADEN','gtin-empty-field'),
+    ('GTOT','GTPRQ','EMPTY','gtot-delivery-field'),
+    ('DISC','GTPRQ','EMPTY','disc-field'),
+])
+def test_gate_and_discharge_fields_require_correct_load_state(monkeypatch,code,port,empty,field):
+    rows=([event('disc','DISC','GTPRQ',days=-5)] if port=='GTPRQ' and code!='DISC' else [])+[event('gate',code,port,empty=empty)]
+    status=client(monkeypatch,[(rows,{})]).fetch_status(shipment())
+    plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(shipment(),status)
+    assert field not in {f.field_id for f in plan.custom_field_updates}
+
+
+def test_multi_different_load_states_do_not_complete_same_milestone(monkeypatch):
+    first=event('a','GTOT','TWKEL',empty='EMPTY')
+    second=second_container(event('b','GTOT','TWKEL',empty='LADEN'))[0]
+    status=multi_client(monkeypatch,{'ONEU2154315':[first],'CAAU2475597':[second]}).fetch_status(multi_shipment())
+    assert status.latest_move is None and status.recent_moves==[]
+
+
+def test_laden_origin_gate_out_does_not_validate_persisted_empty_pickup(monkeypatch):
+    s=shipment(current_task_status='pendiente de booking')
+    s.current_field_values={'gtot-empty-field':datetime.now(timezone.utc)-timedelta(days=3)}
+    status=client(monkeypatch,[([event('gate','GTOT','TWKEL',empty='LADEN')],{})]).fetch_status(s)
+    plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(s,status)
     assert plan.task_status_update is None
