@@ -99,3 +99,12 @@ def test_verified_empty_return_remains_destination_bound(monkeypatch):
     status=c.fetch_status(shipment())
     plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(shipment(current_task_status='arribado en puerto'),status)
     assert plan.task_status_update=='Vacío devuelto'
+
+
+def test_preflight_uses_only_new_domain_when_enabled(monkeypatch):
+    from shipment_sync.sync import _preflight_hosts_for_line
+    monkeypatch.setenv('ONE_DCSA_ENABLED', 'true')
+    monkeypatch.setenv('ONE_TRACKING_URL_TEMPLATE', 'https://ecomm.one-line.com/legacy')
+    assert _preflight_hosts_for_line('one') == ['apix.one-line.com']
+    monkeypatch.setenv('ONE_DCSA_ENABLED', 'false')
+    assert 'ecomm.one-line.com' in _preflight_hosts_for_line('one')
