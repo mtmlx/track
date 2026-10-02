@@ -107,4 +107,4 @@ def test_preflight_uses_only_new_domain_when_enabled(monkeypatch):
     monkeypatch.setenv('ONE_TRACKING_URL_TEMPLATE', 'https://ecomm.one-line.com/legacy')
     assert _preflight_hosts_for_line('one') == ['apix.one-line.com']
     monkeypatch.setenv('ONE_DCSA_ENABLED', 'false')
-    assert 'ecomm.one-line.com' in _preflight_hosts_for_line('one')
+    assert _preflight_hosts_for_line('one') == ['ecomm.one-line.com']
