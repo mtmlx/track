@@ -180,20 +180,67 @@ class OneDcsaClient:
                 vessel_voyage=vv, source_event_name=source_name, location_code=code,
                 equipment_load_state=e.get('emptyIndicatorCode') if e.get('eventType') == 'EQUIPMENT' else None))
             if event_code == 'ARRI' and same_port(shipment.destination_port, code or location):
-                arrivals.append((classifier == 'ACT', dt, raw_time, vv))
+                arrivals.append((classifier == 'ACT', dt, raw_time, e))
         moves.sort(key=lambda m: m.event_time, reverse=True)
         actual = [m for m in moves if m.event_state == 'actual']
         latest = actual[0] if actual else None
         arrival = max(arrivals, default=None, key=lambda a: (a[0], a[1]))
+        final_vessel = _destination_sailing_voyage(arrival[3], events) if arrival else None
         return ShipmentStatus(status_text=latest.name if latest else 'Awaiting actual ONE event',
             location=latest.location if latest else None, event_time=latest.event_time if latest else None,
             eta_time=arrival[1] if arrival else None, eta_local_text=arrival[2] if arrival else None,
             latest_move=latest, recent_moves=moves, discovered_containers=discovered,
             container_discovery_authoritative=bool(requested), raw_source=self.base + '/v2/events',
             source_url=('https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam=' + discovered[0] + '&trakNoTpCdParam=C') if discovered else None,
-            vessel_voyage=arrival[3] if arrival else None,
-            final_vessel_voyage=arrival[3] if arrival else None,
+            vessel_voyage=final_vessel,
+            final_vessel_voyage=final_vessel,
             destination_port=shipment.destination_port, require_destination_evidence=True)
+
+
+def _destination_sailing_voyage(arrival, events):
+    call = arrival.get('transportCall') or {}
+    vessel = call.get('vessel') or {}
+    name = str(vessel.get('vesselName') or '').strip()
+    if not name:
+        return None
+    export = str(call.get('exportVoyageNumber') or '').strip()
+    inbound = str(call.get('importVoyageNumber') or '').strip()
+    arrival_time = parse_event_time(arrival['eventDateTime'])
+    candidates = []
+    for event in events:
+        if event.get('eventClassifierCode') != 'ACT':
+            continue
+        code = event.get('equipmentEventTypeCode') or event.get('transportEventTypeCode')
+        if code not in ('LOAD', 'DEPA'):
+            continue
+        other_call = event.get('transportCall') or {}
+        other = other_call.get('vessel') or {}
+        if str(other.get('vesselName') or '').strip().upper() != name.upper():
+            continue
+        if vessel.get('vesselIMONumber') and other.get('vesselIMONumber') and vessel['vesselIMONumber'] != other['vesselIMONumber']:
+            continue
+        voyage = str(other_call.get('exportVoyageNumber') or '').strip()
+        when = parse_event_time(event.get('eventDateTime'))
+        if not voyage or when is None or when > arrival_time:
+            continue
+        # Bind evidence to the voyage number, not an earlier rotation of the same ship.
+        reference = export or inbound
+        if reference and _voyage_number(voyage) != _voyage_number(reference):
+            continue
+        candidates.append((when, voyage))
+    if candidates:
+        latest = max(when for when, _ in candidates)
+        voyages = {voyage for when, voyage in candidates if when == latest}
+        if len(voyages) != 1:
+            return None
+        export = next(iter(voyages))
+    # An arrival import voyage is not the sailing voyage printed on documents.
+    return f'{name} {export}' if export else None
+
+
+def _voyage_number(voyage):
+    match = re.fullmatch(r'0*(\d+)[A-Za-z]?', voyage)
+    return match.group(1) if match else voyage.upper()
 
 
 def _discovered_containers(events):

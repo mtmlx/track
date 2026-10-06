@@ -17,13 +17,71 @@ def event(identity, code, port, classifier='ACT', days=-2, empty='LADEN'):
         'eventClassifierCode':classifier,'emptyIndicatorCode':empty,
         'eventDateTime':(datetime.now(timezone.utc)+timedelta(days=days)).isoformat(),
         'eventLocation':{'UNLocationCode':port,'locationName':port},
-        'transportCall':{'vessel':{'vesselName':'FINAL SHIP'},'importVoyageNumber':'001E'}}
+        'transportCall':{'vessel':{'vesselName':'FINAL SHIP'},'exportVoyageNumber':'001E','importVoyageNumber':'001E'}}
 
 
 def client(monkeypatch, pages):
     c=OneDcsaClient();monkeypatch.setattr(c,'_token',lambda:'token')
     iterator=iter(pages);monkeypatch.setattr(c,'_request',lambda *a,**kw:next(iterator))
     return c
+
+
+def sailing_event(identity, code, port, voyage, *, classifier='ACT', days=-2, vessel='ONE CLARA', inbound=None):
+    row = event(identity, code, port, classifier, days)
+    row['transportCall'] = {'vessel': {'vesselName': vessel},
+                            'exportVoyageNumber': voyage, 'importVoyageNumber': inbound}
+    if code in ('DEPA', 'ARRI'):
+        row['eventType'] = 'TRANSPORT'
+        row['transportEventTypeCode'] = row.pop('equipmentEventTypeCode')
+    return row
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_destination_import_reference_cannot_replace_actual_sailing_voyage(monkeypatch, reverse):
+    rows = [sailing_event('load', 'LOAD', 'MXLZC', '0018E', days=-3),
+            sailing_event('departure', 'DEPA', 'MXLZC', '0018E', days=-2),
+            sailing_event('arrival', 'ARRI', 'GTPRQ', '', classifier='EST', days=5, inbound='0018W')]
+    if reverse:
+        rows.reverse()
+    c = client(monkeypatch, [(rows, {})])
+    status = c.fetch_status(shipment())
+    assert status.final_vessel_voyage == 'ONE CLARA 0018E'
+    assert status.eta_time > datetime.now(timezone.utc)
+    settings = _settings(cf_vessel_voyage='vessel-field')
+    s = shipment()
+    s.current_field_values = {'vessel-field': 'ONE CLARA 0018W'}
+    plan = ClickUpClient(settings).plan_shipment_update(s, status)
+    assert next(f.value for f in plan.custom_field_updates if f.field_id == 'vessel-field') == 'ONE CLARA 0018E'
+    s.current_field_values['vessel-field'] = 'ONE CLARA 0018E'
+    repeated = ClickUpClient(settings).plan_shipment_update(s, c._map_status(s, rows, ['ONEU2154315']))
+    assert 'vessel-field' not in {f.field_id for f in repeated.custom_field_updates}
+
+
+@pytest.mark.parametrize('kind', ['inbound-only', 'wrong-vessel', 'old-rotation', 'conflicting'])
+def test_unresolved_destination_voyage_preserves_verified_field(monkeypatch, kind):
+    rows = [sailing_event('arrival', 'ARRI', 'GTPRQ', '', classifier='EST', days=5, inbound='0018W')]
+    if kind == 'wrong-vessel':
+        rows.append(sailing_event('load', 'LOAD', 'MXLZC', '0018E', vessel='OTHER SHIP'))
+    elif kind == 'old-rotation':
+        rows.append(sailing_event('load', 'LOAD', 'MXLZC', '0017E'))
+    elif kind == 'conflicting':
+        first = sailing_event('load', 'LOAD', 'MXLZC', '0018E')
+        second = sailing_event('departure', 'DEPA', 'MXLZC', '0018W')
+        second['eventDateTime'] = first['eventDateTime']
+        rows.extend([first, second])
+    status = client(monkeypatch, [(rows, {})]).fetch_status(shipment())
+    assert status.final_vessel_voyage is None
+    assert status.eta_time is not None
+    s = shipment()
+    s.current_field_values = {'vessel-field': 'ONE CLARA 0018E'}
+    plan = ClickUpClient(_settings(cf_vessel_voyage='vessel-field')).plan_shipment_update(s, status)
+    assert 'vessel-field' not in {f.field_id for f in plan.custom_field_updates}
+
+
+def test_new_final_vessel_remains_visible_without_actual_loading(monkeypatch):
+    rows = [sailing_event('load', 'LOAD', 'TWKEL', '0018E', vessel='OLD SHIP'),
+            sailing_event('arrival', 'ARRI', 'GTPRQ', '0020W', classifier='EST', days=5, vessel='NEW SHIP')]
+    assert client(monkeypatch, [(rows, {})]).fetch_status(shipment()).final_vessel_voyage == 'NEW SHIP 0020W'
 
 
 def test_actual_vs_estimated_destination_and_final_vessel(monkeypatch):
@@ -172,7 +230,7 @@ def test_complete_container_discharge_uses_last_completion(monkeypatch):
 def test_multi_eta_uses_last_arrival_and_vessel_requires_agreement(monkeypatch):
     first=event('a','ARRI','GTPRQ','EST',3)
     second=second_container(event('b','ARRI','GTPRQ','EST',5))[0]
-    second['transportCall']={'vessel':{'vesselName':'OTHER SHIP'},'importVoyageNumber':'002E'}
+    second['transportCall']={'vessel':{'vesselName':'OTHER SHIP'},'exportVoyageNumber':'002E','importVoyageNumber':'002E'}
     rows={'ONEU2154315':[event('a-load','LOAD','TWKEL'),first],'CAAU2475597':second_container(event('b-load','LOAD','TWKEL'))+[second]}
     status=multi_client(monkeypatch,rows).fetch_status(multi_shipment())
     assert status.eta_time==datetime.fromisoformat(second['eventDateTime'])
