@@ -1522,6 +1522,32 @@ def test_plan_shipment_update_prefers_first_load_port_departure_for_etd() -> Non
     assert updates["ETD"].value.date().isoformat() == "2026-03-11"
 
 
+def test_one_etd_repairs_transshipment_date_and_does_not_restore_it() -> None:
+    from dataclasses import replace
+
+    client = ClickUpClient(_settings())
+    shipment = ShipmentRef(
+        task_id="86e1gxd50", task_name="Chongqing origin", shipping_line="one",
+        booking_no="CKGG02226900", container_no="ONEU0511481", list_id="list-1",
+        current_field_values={"etd-field": str(int(datetime(2026, 9, 7, 10, tzinfo=timezone.utc).timestamp() * 1000))},
+    )
+    status = ShipmentStatus(status_text="In transit", recent_moves=[
+        MovementEvent(name="Container Gated In (GTIN)", location="CHONGQING, CHINA(FULL TERMINAL)",
+                      event_time=datetime(2026, 6, 26, tzinfo=timezone.utc), event_state="actual"),
+        MovementEvent(name="Transport Departed (DEPA)", location="CHONGQING, CHINA(FULL TER...",
+                      event_time=datetime(2026, 7, 1, tzinfo=timezone.utc), event_state="actual"),
+        MovementEvent(name="Container Loaded (LOAD)", location="PUSAN, KOREA(FULL TERMINAL)",
+                      event_time=datetime(2026, 9, 7, tzinfo=timezone.utc), event_state="actual"),
+        MovementEvent(name="Transport Departed (DEPA)", location="PUSAN, KOREA(FULL TER...",
+                      event_time=datetime(2026, 9, 8, tzinfo=timezone.utc), event_state="actual"),
+    ])
+    update = next(w for w in client.plan_shipment_update(shipment, status).custom_field_updates if w.label == "ETD")
+    assert update.value.date().isoformat() == "2026-07-01"
+    corrected = replace(shipment, current_field_values={"etd-field": str(int(datetime(2026, 7, 1, 10, tzinfo=timezone.utc).timestamp() * 1000))})
+    for _ in range(3):
+        assert not any(w.label == "ETD" for w in client.plan_shipment_update(corrected, status).custom_field_updates)
+
+
 def test_plan_shipment_update_falls_back_to_first_departure_when_origin_ready_event_is_missing() -> None:
     client = ClickUpClient(_settings())
     shipment = ShipmentRef(

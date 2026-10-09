@@ -1901,12 +1901,19 @@ def _pick_etd_move(moves: list[MovementEvent]) -> MovementEvent | None:
     )
     if first_origin_ready_index is not None:
         origin_ready_move = moves[first_origin_ready_index]
-        later_moves = moves[first_origin_ready_index + 1 :]
+        # Only the first operational leg can establish origin ETD. Later
+        # transshipment loads must never become an origin-barge fallback.
+        first_departure_index = next(
+            (idx for idx in range(first_origin_ready_index + 1, len(moves))
+             if _event_code_from_move(moves[idx]) == "DEPA"),
+            len(moves) - 1,
+        )
+        later_moves = moves[first_origin_ready_index + 1 : first_departure_index + 1]
         same_port_departures = [
             move
             for move in later_moves
             if _event_code_from_move(move) == "DEPA"
-            and _locations_match(move.location, origin_ready_move.location)
+            and _etd_ports_match(move, origin_ready_move)
         ]
         if same_port_departures:
             return same_port_departures[0]
@@ -1934,10 +1941,17 @@ def _pick_etd_move(moves: list[MovementEvent]) -> MovementEvent | None:
 
 
 def _pick_origin_barge_load(moves: list[MovementEvent], origin_ready_index: int) -> MovementEvent | None:
-    candidate_indices = list(range(origin_ready_index, len(moves)))
+    first_departure_index = next(
+        (idx for idx in range(origin_ready_index + 1, len(moves))
+         if _event_code_from_move(moves[idx]) == "DEPA"),
+        len(moves),
+    )
+    candidate_indices = range(origin_ready_index, first_departure_index)
     for load_index in candidate_indices:
         load_move = moves[load_index]
         if _event_code_from_move(load_move) != "LOAD" or load_move.event_time is None:
+            continue
+        if load_index != origin_ready_index and not _etd_ports_match(load_move, moves[origin_ready_index]):
             continue
 
         later_departure_index = next(
@@ -1957,7 +1971,7 @@ def _pick_origin_barge_load(moves: list[MovementEvent], origin_ready_index: int)
                 for idx in range(load_index + 1, later_departure_index)
                 if _event_code_from_move(moves[idx]) == "DISC"
                 and moves[idx].event_time is not None
-                and not _locations_match(moves[idx].location, load_move.location)
+                and _etd_ports_differ(moves[idx], load_move)
             ),
             None,
         )
@@ -1969,10 +1983,35 @@ def _pick_origin_barge_load(moves: list[MovementEvent], origin_ready_index: int)
         # different location still identifies the feeder barge as the first
         # operational leg, and therefore as the ETD for pricing.
         departure_move = moves[later_departure_index]
-        if not _locations_match(departure_move.location, load_move.location):
+        if _etd_ports_differ(departure_move, load_move):
             return load_move
 
     return None
+
+
+def _etd_location_name(move: MovementEvent) -> str | None:
+    # ONE may truncate the terminal suffix, not the preceding city/country.
+    name = _location_key((move.location or "").split("(", 1)[0])
+    if not name or name in {"UNKNOWN", "N/A", "TBD"} or any(mark in name for mark in ("...", "/", ";", "|")):
+        return None
+    return name.rstrip(" ,")
+
+
+def _etd_ports_match(left: MovementEvent, right: MovementEvent) -> bool:
+    left_code, right_code = _location_key(left.location_code), _location_key(right.location_code)
+    if left_code and right_code:
+        return left_code == right_code
+    left_name, right_name = _etd_location_name(left), _etd_location_name(right)
+    return bool(left_name and right_name and
+                (left_name == right_name or same_port(left_name, right_name)))
+
+
+def _etd_ports_differ(left: MovementEvent, right: MovementEvent) -> bool:
+    left_code, right_code = _location_key(left.location_code), _location_key(right.location_code)
+    if left_code and right_code:
+        return left_code != right_code
+    return bool(_etd_location_name(left) and _etd_location_name(right)
+                and not _etd_ports_match(left, right))
 
 
 def _has_actual_barge_yard_load(moves: list[MovementEvent], *, now_utc: datetime) -> bool:
