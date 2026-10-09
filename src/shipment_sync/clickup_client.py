@@ -2000,7 +2000,10 @@ def _etd_location_name(move: MovementEvent) -> str | None:
 def _etd_ports_match(left: MovementEvent, right: MovementEvent) -> bool:
     left_code, right_code = _location_key(left.location_code), _location_key(right.location_code)
     if left_code and right_code:
-        return left_code == right_code
+        if left_code == right_code:
+            return True
+        if all(re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}", code) for code in (left_code, right_code)):
+            return False
     left_name, right_name = _etd_location_name(left), _etd_location_name(right)
     return bool(left_name and right_name and
                 (left_name == right_name or same_port(left_name, right_name)))
@@ -2008,9 +2011,12 @@ def _etd_ports_match(left: MovementEvent, right: MovementEvent) -> bool:
 
 def _etd_ports_differ(left: MovementEvent, right: MovementEvent) -> bool:
     left_code, right_code = _location_key(left.location_code), _location_key(right.location_code)
-    if left_code and right_code:
+    # Carrier facility codes may differ within one port. Only port-shaped
+    # codes or complete geographic names can establish a different port.
+    if left_code and right_code and all(re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}", code) for code in (left_code, right_code)):
         return left_code != right_code
-    return bool(_etd_location_name(left) and _etd_location_name(right)
+    left_name, right_name = _etd_location_name(left), _etd_location_name(right)
+    return bool(left_name and right_name and "," in left_name and "," in right_name
                 and not _etd_ports_match(left, right))
 
 

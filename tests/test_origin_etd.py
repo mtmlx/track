@@ -35,7 +35,7 @@ def test_authoritative_code_matches_different_terminal_names():
     assert _pick_etd_move(moves) is moves[1]
 
 
-@pytest.mark.parametrize("location", [None, "UNKNOWN", "CHONG...", "CHONGQING / SHANGHAI"])
+@pytest.mark.parametrize("location", [None, "UNKNOWN", "CHONG...", "CHONGQING / SHANGHAI", "ORIGIN TERMINAL"])
 def test_unknown_location_does_not_infer_barge(location):
     moves = [event("LOAD", "2026-06-26", location),
              event("DEPA", "2026-07-01", "SHANGHAI, CN"),
@@ -49,6 +49,12 @@ def test_origin_barge_preserved_before_first_departure():
              event("LOAD", "2026-06-22", "HEFEI, CN"),
              event("DISC", "2026-06-28", "SHANGHAI, CN"),
              event("DEPA", "2026-07-01", "SHANGHAI, CN")]
+    assert _pick_etd_move(moves) is moves[1]
+
+
+def test_facility_codes_cannot_infer_different_ports():
+    moves = [event("LOAD", "2026-06-26", "CHONGQING, CN(TERMINAL A)", "CNCKGAA"),
+             event("DEPA", "2026-07-01", "CHONGQING, CN(TERMINAL B)", "CNCKGBB")]
     assert _pick_etd_move(moves) is moves[1]
 
 
