@@ -58,6 +58,21 @@ def test_facility_codes_cannot_infer_different_ports():
     assert _pick_etd_move(moves) is moves[1]
 
 
+@pytest.mark.parametrize("code", ["AMBIGUOUS", "UNKNOWN", "N/A", "TBD"])
+def test_unknown_code_sentinels_cannot_establish_port_identity(code):
+    moves = [event("LOAD", "2026-06-26", None, code),
+             event("DEPA", "2026-07-01", None, code),
+             event("LOAD", "2026-09-07", "PUSAN, KR"),
+             event("DEPA", "2026-09-08", "SHANGHAI, CN")]
+    assert _pick_etd_move(moves) is moves[1]
+
+
+def test_maersk_ambiguous_code_falls_back_to_same_geographic_port():
+    moves = [event("LOAD", "2026-06-26", "SHANGHAI, CN", "AMBIGUOUS"),
+             event("DEPA", "2026-07-01", "SHANGHAI, CN", "CNSHA")]
+    assert _pick_etd_move(moves) is moves[1]
+
+
 def test_later_return_to_origin_cannot_replace_first_departure():
     moves = [event("GTIN", "2026-06-26", "CHONGQING, CN"),
              event("DEPA", "2026-07-01", None),

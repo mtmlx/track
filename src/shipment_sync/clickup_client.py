@@ -1997,8 +1997,13 @@ def _etd_location_name(move: MovementEvent) -> str | None:
     return name.rstrip(" ,")
 
 
+def _etd_location_code(move: MovementEvent) -> str | None:
+    code = _location_key(move.location_code)
+    return None if code in {None, "AMBIGUOUS", "UNKNOWN", "N/A", "TBD"} else code
+
+
 def _etd_ports_match(left: MovementEvent, right: MovementEvent) -> bool:
-    left_code, right_code = _location_key(left.location_code), _location_key(right.location_code)
+    left_code, right_code = _etd_location_code(left), _etd_location_code(right)
     if left_code and right_code:
         if left_code == right_code:
             return True
@@ -2010,7 +2015,7 @@ def _etd_ports_match(left: MovementEvent, right: MovementEvent) -> bool:
 
 
 def _etd_ports_differ(left: MovementEvent, right: MovementEvent) -> bool:
-    left_code, right_code = _location_key(left.location_code), _location_key(right.location_code)
+    left_code, right_code = _etd_location_code(left), _etd_location_code(right)
     # Carrier facility codes may differ within one port. Only port-shaped
     # codes or complete geographic names can establish a different port.
     if left_code and right_code and all(re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}", code) for code in (left_code, right_code)):
