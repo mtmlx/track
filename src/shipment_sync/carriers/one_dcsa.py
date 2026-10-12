@@ -12,6 +12,10 @@ from shipment_sync.destination import same_port
 from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
 
 
+class BookingLifecycleUnavailable(ValueError):
+    """A successful containerless lookup has no explicit booking lifecycle."""
+
+
 class OneDcsaClient:
     def __init__(self):
         self.key = os.getenv('ONE_DCSA_API_KEY', '').strip()
@@ -124,6 +128,8 @@ class OneDcsaClient:
             if not set(references).issubset(discovered):
                 raise ValueError('ONE DCSA booking does not include the listed containers')
             references = discovered
+            if not references and not (shipment.container_no or '').strip():
+                return self._map_booking_status(shipment, discovery)
         if not references or len(references) > 20:
             raise ValueError('ONE DCSA needs between one and twenty validated containers')
         if shipment.expected_container_count and len(references) != shipment.expected_container_count:
@@ -136,6 +142,39 @@ class OneDcsaClient:
         status = statuses[0] if len(statuses) == 1 else _aggregate_statuses(shipment, references, statuses)
         status.container_discovery_authoritative = bool(shipment.container_no)
         return status
+
+    def _map_booking_status(self, shipment, events):
+        # Booking lifecycle evidence is independent of container allocation.
+        # Never project booking-wide physical events onto an unassigned unit.
+        booking_status = _booking_status(events, shipment.booking_no)
+        if booking_status is None:
+            raise BookingLifecycleUnavailable('ONE booking has no explicit lifecycle evidence; preserve existing shipment fields')
+        arrivals = []
+        for event in events:
+            if event.get('eventType') != 'TRANSPORT' or event.get('transportEventTypeCode') != 'ARRI':
+                continue
+            if event.get('eventClassifierCode') not in ('EST', 'PLN'):
+                continue
+            call = event.get('transportCall') or {}
+            location = event.get('eventLocation') or {}
+            port = location.get('UNLocationCode') or call.get('UNLocationCode') or location.get('locationName')
+            if not same_port(shipment.destination_port, port):
+                continue
+            if not event.get('eventDateTime'):
+                continue
+            date = _booking_event_time(event)
+            arrivals.append((date, event))
+        arrival = max(arrivals, default=None, key=lambda item: item[0])
+        confirmed = booking_status == 'Confirmed'
+        return ShipmentStatus(
+            status_text=booking_status, booking_status_text=booking_status,
+            booking_only=True, raw_source=self.base + '/v2/events',
+            source_url=('https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam='
+                        + shipment.booking_no.strip() + '&trakNoTpCdParam=B'),
+            eta_time=arrival[0] if confirmed and arrival else None,
+            eta_local_text=arrival[1]['eventDateTime'] if confirmed and arrival else None,
+            destination_port=shipment.destination_port, require_destination_evidence=True,
+            movement_details='Booking lifecycle only; containers are not yet assigned. No physical milestone inferred.')
 
     def _map_status(self, shipment, events, requested):
         if not events:
@@ -195,6 +234,44 @@ class OneDcsaClient:
             vessel_voyage=final_vessel,
             final_vessel_voyage=final_vessel,
             destination_port=shipment.destination_port, require_destination_evidence=True)
+
+
+def _booking_event_time(event):
+    value = event.get('eventDateTime') or event.get('eventCreatedDateTime')
+    try:
+        date = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError('ONE booking event lacks a valid timestamp') from None
+    if date.tzinfo is None:
+        raise ValueError('ONE booking event lacks an explicit timezone')
+    return date
+
+
+def _booking_status(events, booking):
+    candidates = []
+    for event in events:
+        if event.get('eventType') != 'SHIPMENT' or event.get('documentTypeCode') != 'BKG':
+            continue
+        references = [event.get('documentID'), event.get('carrierBookingReference')]
+        references += [r.get('documentReferenceValue') for r in event.get('documentReferences', [])
+                       if r.get('documentReferenceType') == 'BKG']
+        if booking not in references:
+            raise ValueError('ONE booking lifecycle event lacks matching booking identity')
+        if event.get('eventClassifierCode') != 'ACT':
+            raise ValueError('ONE booking lifecycle event is not actual')
+        date = _booking_event_time(event)
+        if date > datetime.now(timezone.utc):
+            raise ValueError('ONE booking lifecycle event is in the future')
+        candidates.append((date, event.get('shipmentEventTypeCode')))
+    if not candidates:
+        return None
+    latest = max(date for date, _ in candidates)
+    codes = {code for date, code in candidates if date == latest}
+    if len(codes) != 1:
+        raise ValueError('ONE booking lifecycle events conflict at the same timestamp')
+    code = codes.pop()
+    return {'CONF':'Confirmed', 'PENC':'Pending', 'CANC':'Cancelled', 'REJE':'Rejected',
+            'VOID':'Cancelled', 'HOLD':'Pending'}.get(code, 'Unconfirmed')
 
 
 def _destination_sailing_voyage(arrival, events):

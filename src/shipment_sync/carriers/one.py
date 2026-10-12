@@ -48,10 +48,15 @@ class OneAdapter(CarrierAdapter):
 
     def fetch_status(self, shipment: ShipmentRef) -> ShipmentStatus:
         if self.use_dcsa_api:
-            from shipment_sync.carriers.one_dcsa import OneDcsaClient
+            from shipment_sync.carriers.one_dcsa import OneDcsaClient, BookingLifecycleUnavailable
             if self.dcsa_client is None:
                 self.dcsa_client = OneDcsaClient()
-            return self.dcsa_client.fetch_status(shipment)
+            try:
+                return self.dcsa_client.fetch_status(shipment)
+            except BookingLifecycleUnavailable:
+                if shipment.container_no or not self.use_edh_api:
+                    raise
+                return self._fetch_booking_only_status(shipment)
         reference, ref_type_code, preferred_container_no = _pick_search_reference(
             shipment,
             self.booking_type_code,
@@ -120,6 +125,53 @@ class OneAdapter(CarrierAdapter):
             source_url=source_url,
             movement_details=movement_details,
         )
+
+    def _fetch_booking_only_status(self, shipment: ShipmentRef) -> ShipmentStatus:
+        from shipment_sync.destination import same_port
+        url = f"{self.edh_base_url}/containers/track-and-trace/search"
+        response = self.session.post(
+            url, json={"page": 1, "page_length": 10,
+                       "filters": {"search_text": shipment.booking_no, "search_type": "BKG_NO"}},
+            timeout=self.timeout_seconds, stream=True, allow_redirects=False,
+            hooks={"response": reject_response_redirect})
+        try:
+            response.raise_for_status()
+            payload = bounded_response_json(response)
+        finally:
+            response.close()
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if (not isinstance(rows, list) or not rows or payload.get("status") != 200
+                or payload.get("total") != len(rows)):
+            raise ValueError("ONE booking lookup is unavailable or incomplete")
+        if any(not isinstance(row, dict) or row.get("bookingNo") != shipment.booking_no for row in rows):
+            raise ValueError("ONE booking lookup identity mismatch")
+        if extract_container_numbers(payload):
+            raise ValueError("ONE booking lookup has assigned containers; require container-level verification")
+        statuses = {_extract_booking_status_text(row) for row in rows}
+        if len(statuses) != 1 or None in statuses:
+            raise ValueError("ONE booking lookup has ambiguous confirmation evidence")
+        booking_status = statuses.pop()
+        confirmed = booking_status.strip().lower() in {"confirmed", "booking confirmed"}
+        arrivals = []
+        if confirmed:
+            for row in rows:
+                if not same_port(shipment.destination_port, (row.get("pod") or {}).get("code")):
+                    continue
+                for event in row.get("cargoEvents") or []:
+                    if (event.get("matrixId") == "E089" and event.get("trigger") == "ESTIMATED"
+                            and same_port(shipment.destination_port, event.get("locationName"))):
+                        date = parse_event_time(event.get("date"))
+                        if date is not None and date.tzinfo is not None:
+                            arrivals.append((date, event.get("localPortDate") or event["date"]))
+        if len({date for date, _ in arrivals}) > 1:
+            raise ValueError("ONE booking lookup has conflicting destination schedules")
+        arrival = arrivals[0] if arrivals else None
+        return ShipmentStatus(
+            status_text=booking_status, booking_status_text=booking_status, booking_only=True,
+            eta_time=arrival[0] if arrival else None, eta_local_text=arrival[1] if arrival else None,
+            raw_source=url, source_url=_build_one_tracking_url(shipment.booking_no, "B", "C"),
+            destination_port=shipment.destination_port, require_destination_evidence=True,
+            movement_details="Explicit booking lifecycle; containers not assigned. No physical milestones inferred.")
 
     def _fetch_status_from_edh(
         self,
