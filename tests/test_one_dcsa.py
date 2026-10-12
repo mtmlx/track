@@ -26,6 +26,93 @@ def client(monkeypatch, pages):
     return c
 
 
+def booking_event(code='CONF', days=-1):
+    return {'eventID': 'booking-' + code, 'eventType': 'SHIPMENT',
+            'documentTypeCode': 'BKG', 'documentID': 'BOOK',
+            'eventClassifierCode': 'ACT', 'shipmentEventTypeCode': code,
+            'eventDateTime': (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()}
+
+
+@pytest.mark.parametrize('code,expected', [('CONF', 'BK confirmado'), ('PENC', None),
+                                         ('CANC', None), ('REJE', None), ('UNKNOWN', None)])
+def test_containerless_booking_requires_explicit_confirmation(monkeypatch, code, expected):
+    s = shipment(current_task_status='Pendiente de booking')
+    s.container_no = None
+    s.current_field_values = {'etd-field': int((datetime.now(timezone.utc)+timedelta(days=5)).timestamp()*1000),
+                              'eta-field': int((datetime.now(timezone.utc)+timedelta(days=30)).timestamp()*1000)}
+    status = client(monkeypatch, [([booking_event(code)], {})]).fetch_status(s)
+    assert status.booking_only and not status.recent_moves and not status.discovered_containers
+    assert ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(s, status).task_status_update == expected
+
+
+def test_containerless_confirmed_without_eta_stays_pending(monkeypatch):
+    s = shipment(current_task_status='Pendiente de booking'); s.container_no = None
+    status = client(monkeypatch, [([booking_event()], {})]).fetch_status(s)
+    assert ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(s, status).task_status_update is None
+
+
+@pytest.mark.parametrize('change', [{'documentID':'OTHER'}, {'eventClassifierCode':'EST'},
+                                   {'eventDateTime':'2026-10-01T00:00:00'},
+                                   {'eventDateTime':None}])
+def test_containerless_booking_invalid_evidence_holds(monkeypatch, change):
+    s=shipment(); s.container_no=None
+    row=booking_event(); row.update(change)
+    with pytest.raises(ValueError): client(monkeypatch, [([row], {})]).fetch_status(s)
+
+
+def test_containerless_latest_cancellation_overrules_confirmation(monkeypatch):
+    s=shipment(); s.container_no=None
+    assert client(monkeypatch, [([booking_event(days=-2), booking_event('CANC')], {})]).fetch_status(s).booking_status_text == 'Cancelled'
+
+
+def test_booking_only_does_not_project_physical_events(monkeypatch):
+    s=shipment(current_task_status='Pendiente de booking'); s.container_no=None
+    row=event('discharge','DISC','GTPRQ'); row.pop('equipmentReference')
+    status=client(monkeypatch, [([booking_event(), row], {})]).fetch_status(s)
+    assert not status.recent_moves and status.latest_move is None
+
+
+def test_booking_source_fallback_is_exact_and_guarded(monkeypatch):
+    from shipment_sync.carriers.one import OneAdapter
+    import shipment_sync.carriers.one as one
+    payload = {
+        'status':200, 'total':1, 'data':[{'bookingNo':'BOOK', 'latestEvent':{'eventName':'Booking Confirmed'},
+        'pod':{'code':'GTPRQ'}, 'cargoEvents':[{'matrixId':'E089','trigger':'ESTIMATED',
+        'locationName':'PUERTO QUETZAL','date':'2026-12-05T10:00:00Z'}]}]}
+    class Response:
+        def raise_for_status(self): pass
+        def close(self): pass
+    adapter=OneAdapter(); monkeypatch.setattr(adapter.session,'post',lambda *a,**k:Response())
+    monkeypatch.setattr(one,'bounded_response_json',lambda r:payload)
+    s=shipment(); s.container_no=None
+    status=adapter._fetch_booking_only_status(s)
+    assert status.booking_only and status.eta_time is not None and not status.recent_moves
+    payload['data'][0]['latestEvent']['eventName']='Processing'
+    assert adapter._fetch_booking_only_status(s).eta_time is None
+    payload['data'][0]['latestEvent']['eventName']='Booking Cancelled'
+    assert adapter._fetch_booking_only_status(s).eta_time is None
+    payload['data'][0]['latestEvent']['eventName']='Booking Confirmed'
+    payload['data'][0]['pod']['code']='PABLB'
+    assert adapter._fetch_booking_only_status(s).eta_time is None
+    payload['data'][0]['pod']['code']='GTPRQ'
+    payload['total']=2
+    with pytest.raises(ValueError,match='incomplete'): adapter._fetch_booking_only_status(s)
+    payload['total']=1
+    payload['data'][0]['bookingNo']='OTHER'
+    with pytest.raises(ValueError,match='identity'): adapter._fetch_booking_only_status(s)
+
+
+def test_booking_fallback_never_masks_dcsa_authentication_failure(monkeypatch):
+    from shipment_sync.carriers.one import OneAdapter
+    adapter=OneAdapter(); adapter.use_dcsa_api=True
+    adapter.dcsa_client=OneDcsaClient()
+    def fail(s): raise RuntimeError('ONE DCSA HTTP 403')
+    monkeypatch.setattr(adapter.dcsa_client,'fetch_status',fail)
+    monkeypatch.setattr(adapter,'_fetch_booking_only_status',lambda s:pytest.fail('unauthorized fallback'))
+    s=shipment(); s.container_no=None
+    with pytest.raises(RuntimeError,match='403'): adapter.fetch_status(s)
+
+
 def sailing_event(identity, code, port, voyage, *, classifier='ACT', days=-2, vessel='ONE CLARA', inbound=None):
     row = event(identity, code, port, classifier, days)
     row['transportCall'] = {'vessel': {'vesselName': vessel},

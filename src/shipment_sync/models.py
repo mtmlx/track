@@ -41,6 +41,7 @@ class ShipmentStatus:
     booking_status_text: str | None = None
     destination_port: str | None = None
     require_destination_evidence: bool = False
+    booking_only: bool = False
 
 
 @dataclass

@@ -1381,6 +1381,13 @@ def _derive_operational_status_step(
     gate_in_empty_date = _field_date(settings.cf_gate_in_empty, field_values)
     discharge_date = _field_date(settings.cf_discharge_date, field_values)
 
+    if status.booking_only:
+        # Scheduled dates can confirm readiness, never collection or transit.
+        if (carrier_set and booking_set and etd_date is not None and eta_date is not None
+                and _carrier_booking_allows_confirmation(shipment, status)):
+            return "booking_confirmed"
+        return None
+
     strict_one_origin = status.raw_source == "https://apix.one-line.com/v2/events"
     actual_origin_codes = set()
     if strict_one_origin:
