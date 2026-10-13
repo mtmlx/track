@@ -314,6 +314,14 @@ def _run_sync(
                         terminal_safe_text(f"Wan Hai manual capture requested for task {shipment.task_id} ({shipment.task_name})."),
                         file=sys.stderr,
                     )
+            if _one_booking_conflict(shipment.shipping_line, message):
+                try:
+                    if client.report_one_booking_conflict(shipment):
+                        print(f"ONE booking conflict comment posted for task {shipment.task_id}.", file=sys.stderr)
+                except Exception as comment_exc:
+                    print(terminal_safe_text(
+                        f"ONE booking conflict comment failed for task {shipment.task_id}: {comment_exc}"),
+                        file=sys.stderr)
             print(
                 terminal_safe_text(f"Skipped task {shipment.task_id} ({shipment.task_name}): {exc}"),
                 file=sys.stderr,
@@ -396,6 +404,15 @@ def _normalize_status_name(value: str) -> str:
     decomposed = unicodedata.normalize("NFKD", value)
     ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     return re.sub(r"[^a-z0-9]+", "", ascii_text.lower())
+
+
+def _one_booking_conflict(shipping_line: str, message: str) -> bool:
+    return shipping_line.strip().lower() == "one" and message in {
+        "ONE DCSA returned a conflicting booking",
+        "ONE booking lookup identity mismatch",
+        "ONE booking lifecycle event lacks matching booking identity",
+        "ONE DCSA booking does not include the listed containers",
+    }
 
 
 def _wan_hai_manual_capture_needed(shipping_line: str, message: str) -> bool:

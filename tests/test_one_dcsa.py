@@ -113,6 +113,131 @@ def test_booking_fallback_never_masks_dcsa_authentication_failure(monkeypatch):
     with pytest.raises(RuntimeError,match='403'): adapter.fetch_status(s)
 
 
+@pytest.mark.parametrize('reason,expected', [
+    ('ONE DCSA returned a conflicting booking', True),
+    ('ONE booking lookup identity mismatch', True),
+    ('ONE booking lifecycle event lacks matching booking identity', True),
+    ('ONE DCSA booking does not include the listed containers', True),
+    ('ONE booking lookup is unavailable or incomplete', False),
+    ('ONE DCSA HTTP 403', False),
+])
+def test_booking_conflict_notification_scope(reason, expected):
+    from shipment_sync.sync import _one_booking_conflict
+    assert _one_booking_conflict('one',reason) is expected
+    assert not _one_booking_conflict('msc',reason)
+
+
+def conflict_client(monkeypatch):
+    c=ClickUpClient(_settings())
+    task={'id':'t','status':{'status':'Pendiente de booking'},'assignees':[{'id':12},{'id':34}],
+          'custom_fields':[{'id':c.settings.cf_booking_no,'value':'BOOK'},
+                           {'id':c.settings.cf_container_no,'value':'ONEU2154315'}]}
+    history=[]; posts=[]; reads=[]
+    class Response:
+        def __init__(self,data): self.data=data
+        def raise_for_status(self): pass
+        def json(self): return self.data
+    def request(method,url,**kwargs):
+        assert method=='get'
+        reads.append(kwargs.get('params'))
+        return Response({'comments':history} if url.endswith('/comment') else task)
+    def post(url,**kwargs):
+        posts.append(kwargs['json'])
+        return Response({'id':'comment-1'})
+    monkeypatch.setattr(c,'_request',request)
+    monkeypatch.setattr(c.session,'post',post)
+    return c,task,history,posts,reads
+
+
+def test_booking_conflict_mentions_current_owners_and_deduplicates(monkeypatch):
+    c,task,history,posts,_=conflict_client(monkeypatch)
+    assert c.report_one_booking_conflict(shipment())
+    assert [p['user']['id'] for p in posts[0]['comment'] if p.get('type')=='tag']==[12,34]
+    assert posts[0]['notify_all'] is False
+    assert 'No shipment fields' in posts[0]['comment'][0]['text']
+    history.append({'id':'comment-1','date':str(int(datetime.now(timezone.utc).timestamp()*1000)),
+                    'comment':posts[0]['comment']})
+    assert not c.report_one_booking_conflict(shipment())
+    assert len(posts)==1
+
+
+@pytest.mark.parametrize('change', ['booking','container','terminal'])
+def test_conflict_comment_respects_concurrent_corrections_and_terminal_status(monkeypatch,change):
+    c,task,_,posts,_=conflict_client(monkeypatch)
+    if change=='terminal': task['status']['status']='VACIO DEVUELTO'
+    else: task['custom_fields'][0 if change=='booking' else 1]['value']='CHANGED'
+    assert not c.report_one_booking_conflict(shipment())
+    assert not posts
+
+
+def test_unassigned_conflict_posts_review_without_inventing_an_owner(monkeypatch):
+    c,task,_,posts,_=conflict_client(monkeypatch); task['assignees']=[]
+    assert c.report_one_booking_conflict(shipment())
+    assert not any(p.get('type')=='tag' for p in posts[0]['comment'])
+    assert 'No task assignee' in posts[0]['comment'][-1]['text']
+
+
+def test_conflict_history_failure_never_posts_blindly(monkeypatch):
+    c,_,history,posts,_=conflict_client(monkeypatch)
+    history.append({'id':'unknown','comment_text':'no timestamp'})
+    with pytest.raises(ValueError,match='timestamp'): c.report_one_booking_conflict(shipment())
+    assert not posts
+
+
+def test_conflict_post_timeout_is_not_retried(monkeypatch):
+    import requests
+    c,_,_,_,_=conflict_client(monkeypatch); calls=[]
+    def timeout(*a,**kw): calls.append(kw); raise requests.Timeout('ambiguous POST')
+    monkeypatch.setattr(c.session,'post',timeout)
+    with pytest.raises(requests.Timeout): c.report_one_booking_conflict(shipment())
+    assert len(calls)==1
+
+
+def test_conflict_comment_cooldown_expires_after_one_day(monkeypatch):
+    c,_,history,posts,_=conflict_client(monkeypatch)
+    assert c.report_one_booking_conflict(shipment())
+    history.append({'id':'old','date':str(int((datetime.now(timezone.utc)-timedelta(hours=25)).timestamp()*1000)),
+                    'comment':posts[0]['comment']})
+    assert c.report_one_booking_conflict(shipment())
+    assert len(posts)==2
+
+
+def test_conflict_comment_search_paginates_past_busy_recent_history(monkeypatch):
+    c,task,_,posts,_=conflict_client(monkeypatch)
+    assert c.report_one_booking_conflict(shipment())
+    now=str(int(datetime.now(timezone.utc).timestamp()*1000))
+    first=[{'id':str(i),'date':now,'comment_text':'unrelated'} for i in range(25)]
+    second=[{'id':'alert','date':now,'comment':posts[0]['comment']}]
+    cursors=[]
+    class Response:
+        def __init__(self,data): self.data=data
+        def raise_for_status(self): pass
+        def json(self): return self.data
+    def request(method,url,**kwargs):
+        if not url.endswith('/comment'): return Response(task)
+        params=kwargs['params']; cursors.append(dict(params))
+        return Response({'comments':second if params else first})
+    monkeypatch.setattr(c,'_request',request)
+    assert not c.report_one_booking_conflict(shipment())
+    assert cursors==[{}, {'start':now,'start_id':'24'}]
+    assert len(posts)==1
+
+
+def test_conflict_comment_failure_does_not_stop_worker(monkeypatch):
+    from shipment_sync.sync import _run_sync
+    class Adapter:
+        def fetch_status(self,s): raise ValueError('ONE DCSA returned a conflicting booking')
+    c=ClickUpClient(_settings(shipment_preflight_enabled=False))
+    calls=[]
+    def report(s): calls.append(s.task_id); raise RuntimeError('comment service unavailable')
+    monkeypatch.setattr(c,'report_one_booking_conflict',report)
+    monkeypatch.setattr('shipment_sync.sync.build_carrier_registry',lambda:{'one':Adapter()})
+    first=shipment(); second=shipment(); second.task_id='second'
+    stats=_run_sync(c,[first,second])
+    assert stats.skipped==2 and not stats.updated_items
+    assert calls==['t','second']
+
+
 def sailing_event(identity, code, port, voyage, *, classifier='ACT', days=-2, vessel='ONE CLARA', inbound=None):
     row = event(identity, code, port, classifier, days)
     row['transportCall'] = {'vessel': {'vesselName': vessel},
