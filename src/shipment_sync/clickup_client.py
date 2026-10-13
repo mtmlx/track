@@ -890,7 +890,12 @@ class ClickUpClient:
         )
 
     def update_shipment_status(self, shipment: ShipmentRef, status: ShipmentStatus) -> ShipmentWriteResult:
-        plan = self.plan_shipment_update(shipment, status)
+        try:
+            plan = self.plan_shipment_update(shipment, status)
+        except Exception as exc:
+            # Preserve the original exception contract while identifying a read-only failure.
+            exc.shipment_sync_phase = 'projection'
+            raise
 
         for update in plan.custom_field_updates:
             if update.field_type == "datetime":
@@ -981,7 +986,7 @@ class ClickUpClient:
         if (current_destination != shipment.destination_port
                 and not same_port(current_destination, shipment.destination_port)):
             return False
-        if phase != 'writeback' and self.settings.cf_status_last_checked:
+        if phase not in {'writeback', 'partial_browser_batch'} and self.settings.cf_status_last_checked:
             current_checked = _parse_last_checked(fields.get(self.settings.cf_status_last_checked))
             if current_checked is not None and (shipment.last_checked_at is None or current_checked > shipment.last_checked_at):
                 return False  # A later successful run supersedes this failed lookup.
@@ -999,7 +1004,8 @@ class ClickUpClient:
             return False
         fingerprint = hashlib.sha256(json.dumps(
             [shipment.task_id, carrier_name(shipment.shipping_line), shipment.booking_no,
-             shipment.container_no, shipment.expected_container_count, notice.category, owners],
+             shipment.container_no, shipment.expected_container_count, notice.category,
+             (reference or '').strip().upper(), owners],
             separators=(",", ":")).encode()).hexdigest()[:24]
         marker = f"T&T failure notice [{fingerprint}]"
         legacy_markers = ()

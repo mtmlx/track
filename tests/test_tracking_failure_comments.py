@@ -247,3 +247,77 @@ def test_task_status_write_failure_notifies_without_claiming_complete_success(mo
     client.update_shipment_status(shipment(), ShipmentStatus('transito'))
     assert len(posts) == 1
     assert 'Write outcome is uncertain' in posts[0]['comment'][0]['text']
+
+
+def test_each_failed_browser_reference_is_visible_with_its_own_cooldown(monkeypatch):
+    client, task, history, posts, _ = conflict_client(monkeypatch)
+    ref=shipment(); ref.shipping_line='msc'
+    task['custom_fields'][2]['value']='msc'
+    assert client.report_msc_tracking_failure(ref, reference='ONEU2154315', error='no result')
+    history.append({'id':'1','date':str(int(datetime.now(timezone.utc).timestamp()*1000)),
+                    'comment':posts[0]['comment']})
+    assert client.report_msc_tracking_failure(ref, reference='MSCU1234567', error='no result')
+    history.append({'id':'2','date':str(int(datetime.now(timezone.utc).timestamp()*1000)),
+                    'comment':posts[1]['comment']})
+    assert not client.report_msc_tracking_failure(ref, reference=' mscu1234567 ', error='no result')
+    assert len(posts)==2
+    assert 'Reference checked: MSCU1234567' in posts[1]['comment'][0]['text']
+
+
+def test_read_only_planning_failure_keeps_its_type_and_notifies_as_projection(monkeypatch):
+    client, _, _, posts, _ = conflict_client(monkeypatch)
+    client.settings.shipment_preflight_enabled=False
+    class Adapter:
+        def fetch_status(self, ref): return ShipmentStatus('transito')
+    monkeypatch.setattr('shipment_sync.sync.build_carrier_registry',lambda:{'one':Adapter()})
+    def invalid_plan(*args): raise ValueError('destination evidence missing')
+    monkeypatch.setattr(client,'plan_shipment_update',invalid_plan)
+    with pytest.raises(ValueError) as caught:
+        client.update_shipment_status(shipment(),ShipmentStatus('transito'))
+    assert caught.value.shipment_sync_phase=='projection'
+    assert _run_sync(client,[shipment()]).skipped==1
+    text=posts[0]['comment'][0]['text']
+    assert 'failure stage: projection' in text
+    assert 'Some fields or comments may already have been saved' not in text
+    assert 'did not write shipment fields' in text
+
+
+def test_browser_projection_error_is_retained_in_private_report(monkeypatch,tmp_path,capsys):
+    from shipment_sync.msc_browser_assisted import MscBrowserCapture
+    from shipment_sync.msc_browser_assisted_main import _import_batch
+    client, task, _, posts, _ = conflict_client(monkeypatch)
+    ref=shipment(); ref.shipping_line='msc'; task['custom_fields'][2]['value']='msc'
+    monkeypatch.setattr('shipment_sync.msc_browser_assisted_main.status_from_browser_capture',lambda text:ShipmentStatus('transito'))
+    monkeypatch.setattr('shipment_sync.msc_browser_assisted_main.consolidate_browser_statuses',lambda ref,entries:entries[0][1])
+    def invalid_plan(*args): raise ValueError('private projection diagnostic')
+    monkeypatch.setattr(client,'plan_shipment_update',invalid_plan)
+    path=tmp_path/'private.jsonl'
+    _import_batch(client,[ref],[MscBrowserCapture(ref.task_id,'capture')],[],apply=True,report_path=path)
+    row=json.loads(path.read_text().splitlines()[0])
+    assert row['outcome']=='projection_rejected'
+    assert row['reason']=='private projection diagnostic' and row['exception_type']=='ValueError'
+    assert 'private projection diagnostic' in capsys.readouterr().out
+    assert 'private projection diagnostic' not in posts[0]['comment'][0]['text']
+
+
+def test_accepted_capture_plus_failed_reference_is_not_an_uncertain_write(monkeypatch):
+    from shipment_sync.msc_browser_assisted import MscBrowserCapture,MscBrowserFailure
+    from shipment_sync.msc_browser_assisted_main import _import_batch
+    client,task,_,posts,_=conflict_client(monkeypatch)
+    ref=shipment(); ref.shipping_line='msc'; task['custom_fields'][2]['value']='msc'
+    monkeypatch.setattr('shipment_sync.msc_browser_assisted_main.status_from_browser_capture',lambda text:ShipmentStatus('transito'))
+    monkeypatch.setattr('shipment_sync.msc_browser_assisted_main.consolidate_browser_statuses',lambda ref,entries:entries[0][1])
+    monkeypatch.setattr(client,'plan_shipment_update',lambda *args:ShipmentUpdatePlan(True,'transito','hash'))
+    def accepted(*args):
+        task['custom_fields'].append({'id':client.settings.cf_status_last_checked,
+            'value':str(int(datetime.now(timezone.utc).timestamp()*1000))})
+        return ShipmentWriteResult(True,'transito','hash')
+    monkeypatch.setattr(client,'update_shipment_status',accepted)
+    _import_batch(client,[ref],[MscBrowserCapture(ref.task_id,'capture')],
+        [MscBrowserFailure(ref.task_id,'MSCU1234567','no result')],apply=True)
+    assert len(posts)==1
+    text=posts[0]['comment'][0]['text']
+    assert 'partial_browser_batch' in text and 'Reference checked: MSCU1234567' in text
+    assert 'not evidence that an accepted ClickUp write failed' in text
+    assert 'Write outcome is uncertain' not in text
+    assert 'did not write shipment fields' not in text

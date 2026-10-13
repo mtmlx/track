@@ -182,7 +182,9 @@ def _import_batch(client: ClickUpClient, shipments, captures, failures, *, apply
         try:
             plan = client.plan_shipment_update(shipment, status)
         except Exception as exc:
-            _record_outcome(report_path, task_id, 'projection_rejected', evidence_hash=evidence_hash)
+            _record_outcome(report_path, task_id, 'projection_rejected', evidence_hash=evidence_hash,
+                            reason=str(exc), exception_type=type(exc).__name__)
+            print(terminal_safe_text(f'MSC task={task_id}: projection rejected: {type(exc).__name__}: {exc}'))
             if apply:
                 failure_comments += int(_notify_tracking_failure(client, shipment, str(exc), phase='projection', method='browser capture/import'))
             continue
@@ -192,11 +194,15 @@ def _import_batch(client: ClickUpClient, shipments, captures, failures, *, apply
             try:
                 result = client.update_shipment_status(shipment, status)
             except Exception as exc:
+                phase = getattr(exc, 'shipment_sync_phase', 'writeback')
+                if phase != 'projection':
+                    phase = 'writeback'
                 # A timeout can occur after a partial write. Do not automatically
                 # replay or stamp success; re-read ClickUp before resuming it.
-                _record_outcome(report_path, task_id, "write_uncertain", evidence_hash=evidence_hash)
-                print(terminal_safe_text(f"MSC task={task_id}: write uncertain; verify ClickUp before retrying"))
-                failure_comments += int(_notify_tracking_failure(client, shipment, str(exc), phase='writeback', method='browser capture/import'))
+                _record_outcome(report_path, task_id, 'projection_rejected' if phase == 'projection' else 'write_uncertain',
+                                evidence_hash=evidence_hash, reason=str(exc), exception_type=type(exc).__name__)
+                print(terminal_safe_text(f'MSC task={task_id}: {phase} failed: {type(exc).__name__}: {exc}; review before retrying'))
+                failure_comments += int(_notify_tracking_failure(client, shipment, str(exc), phase=phase, method='browser capture/import'))
                 continue
             written_ids.add(task_id)
             _record_outcome(report_path, task_id, "write_accepted", evidence_hash=evidence_hash, changed=result.changed)
@@ -221,7 +227,8 @@ def _import_batch(client: ClickUpClient, shipments, captures, failures, *, apply
         if apply:
             try:
                 if item.task_id in written_ids:
-                    failure_comments += int(_notify_tracking_failure(client, shipment, item.error, phase='writeback', method='browser capture/import'))
+                    failure_comments += int(_notify_tracking_failure(client, shipment, item.error,
+                        phase='partial_browser_batch', method='browser capture/import', reference=item.reference))
                 elif client.report_msc_tracking_failure(shipment, reference=item.reference, error=item.error):
                     failure_comments += 1
             except Exception:

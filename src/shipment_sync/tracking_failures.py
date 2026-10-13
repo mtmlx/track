@@ -52,6 +52,12 @@ def source_url(shipment: ShipmentRef) -> str | None:
 
 def classify_failure(shipment: ShipmentRef, error: str, *, phase: str = 'lookup') -> FailureNotice:
     message = error.lower()
+    if phase == 'partial_browser_batch':
+        failed = classify_failure(shipment, error)
+        return FailureNotice('partial_browser_batch_' + failed.category,
+            'Some browser evidence was accepted for this task, but another reference failed. ' + failed.issue,
+            'This is a carrier/capture failure, not evidence that an accepted ClickUp write failed. Tracking coverage is still incomplete. ' + failed.reason,
+            failed.actions)
     if phase == 'writeback':
         return FailureNotice('writeback_uncertain',
             'Tracking reached ClickUp writeback, but the update did not complete reliably.',
@@ -141,6 +147,8 @@ def failure_comment(shipment: ShipmentRef, notice: FailureNotice, *, method: str
         lines.append('This shipment was not queried because the carrier connection preflight failed.')
     if phase == 'writeback':
         lines.append('Write outcome is uncertain: current ClickUp values must be verified before retrying. This notification does not change shipment fields or status.')
+    elif phase == 'partial_browser_batch':
+        lines.append('Accepted updates are not being rolled back. The failed reference is not treated as complete shipment evidence. No automatic replay or reset will occur.')
     else:
         lines.append('This failed lookup did not write shipment fields, Last T&T Update, or workflow status. This notification only adds a comment.')
     lines += ['', 'CORRECTIVE ACTION - TASK ASSIGNEE:']

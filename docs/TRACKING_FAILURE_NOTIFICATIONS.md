@@ -37,6 +37,8 @@ declare a booking cancelled or invalid solely because a lookup failed.
 - A newer successful Last T&T Update supersedes a lookup failure.
 - The same category/references/assignees are suppressed for 24 hours across API
   and browser paths. An owner or reference change can create a new notice.
+  Distinct failed container references have separate cooldown keys so none are
+  hidden behind another container's notice.
 - Comment history is paginated with a bounded safety limit. Unavailable or
   malformed history fails closed; the worker logs delivery failure.
 - Comment POSTs are single-attempt. An ambiguous response is not blindly retried.
@@ -48,6 +50,9 @@ declare a booking cancelled or invalid solely because a lookup failed.
   Carrier processing continues and delivery failures remain in the run logs.
 - The notice does not change shipment fields, status, assignees or Last T&T
   Update. Writeback notices explicitly warn that preceding writes may be partial.
+- Read-only projection failures are not labeled uncertain writes. Browser planning
+  exceptions remain in the private run report/logs. Mixed accepted/failed browser
+  evidence names the failed reference without implying an accepted write failed.
 - Browser preview mode never posts comments. Only approved `--apply` imports do.
 - Excluded, recent, terminal and deliberately unsupported shipments are not
   failures and do not receive notifications.

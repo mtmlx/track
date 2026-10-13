@@ -288,6 +288,8 @@ def _run_sync(
                         message=write_result.status_value,
                     )
         except Exception as exc:
+            if failure_phase == 'writeback' and getattr(exc, 'shipment_sync_phase', None) == 'projection':
+                failure_phase = 'projection'
             message = str(exc)
             if failure_phase == 'lookup' and _carrier_access_denied(shipment.shipping_line, message):
                 carrier_access_failures[shipment.shipping_line] = message
@@ -376,14 +378,15 @@ def _list_label(list_name: str | None, list_id: str) -> str:
 
 
 def _notify_tracking_failure(client: ClickUpClient, shipment: ShipmentRef, error: str,
-                             *, phase: str = 'lookup', method: str = 'automated carrier adapter') -> bool:
+                             *, phase: str = 'lookup', method: str = 'automated carrier adapter',
+                             reference: str | None = None) -> bool:
     try:
         if phase == 'lookup' and _wan_hai_manual_capture_needed(shipment.shipping_line, error):
             posted = client.request_wan_hai_manual_capture(shipment, error=error)
         elif phase == 'lookup' and _one_booking_conflict(shipment.shipping_line, error):
             posted = client.report_one_booking_conflict(shipment)
         else:
-            posted = client.report_tracking_failure(shipment, error=error, phase=phase, method=method)
+            posted = client.report_tracking_failure(shipment, error=error, phase=phase, method=method, reference=reference)
         if posted:
             print(terminal_safe_text(f'T&T failure comment posted for task {shipment.task_id}.'), file=sys.stderr)
         return posted
