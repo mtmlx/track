@@ -11,6 +11,7 @@ import sys
 import time
 import unicodedata
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -954,6 +955,91 @@ class ClickUpClient:
             ),
         )
         return True
+
+    def report_one_booking_conflict(self, shipment: ShipmentRef) -> bool:
+        """Notify current owners of a held reference, without changing shipment data."""
+        if shipment.shipping_line.strip().lower() != "one":
+            return False
+        response = self._request("get", f"{self.base_url}/task/{shipment.task_id}", timeout=30)
+        response.raise_for_status()
+        task = response.json()
+        if task.get("id") != shipment.task_id:
+            raise ValueError("ONE conflict comment task identity mismatch")
+        fields = _field_map(task.get("custom_fields") or [])
+        for field_id, expected in ((self.settings.cf_booking_no, shipment.booking_no),
+                                   (self.settings.cf_container_no, shipment.container_no)):
+            current = _field_text(fields.get(field_id))
+            if (current or "").strip().upper() != (expected or "").strip().upper():
+                return False  # A human has already changed the reference since this lookup.
+        status = task.get("status") or {}
+        if isinstance(status, dict):
+            status = status.get("status") or ""
+        if any(_normalize_workflow_status_name(status) == _normalize_workflow_status_name(value)
+               for value in self.settings.shipment_terminal_statuses):
+            return False
+        owners = sorted({int(user["id"]) for user in task.get("assignees") or []
+                         if isinstance(user, dict) and str(user.get("id", "")).isdigit()})
+        fingerprint = hashlib.sha256(json.dumps(
+            [shipment.task_id, shipment.booking_no, shipment.container_no, owners],
+            separators=(",", ":")).encode()).hexdigest()[:24]
+        marker = f"ONE T&T booking conflict [{fingerprint}]"
+        if self._recent_conflict_comment_exists(shipment.task_id, marker):
+            return False
+        booking = shipment.booking_no or "not set"
+        containers = shipment.container_no or "not assigned"
+        text = "\n".join([
+            marker, "", "ISSUE: ONE's tracking response conflicts with this task's booking/container references, or does not provide enough matching identity evidence to confirm that it belongs to this shipment.",
+            f"Booking checked: {booking}", f"Containers checked: {containers}",
+            "Carrier source: https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam="
+            + quote(shipment.booking_no or shipment.container_no or "", safe="")
+            + ("&trakNoTpCdParam=B" if shipment.booking_no else "&trakNoTpCdParam=C"),
+            "", "IMPACT: Automatic tracking for this shipment is paused for this lookup. Dates, vessel/voyage, container details, and status may remain out of date. Using conflicting carrier data could assign another booking's information to this shipment and affect customer visibility, shipment documents, and manifests.",
+            "", "WHY WE CANNOT PROCEED: We cannot safely establish that the carrier response belongs to the booking and containers recorded here. A booking number alone is not sufficient when the identity evidence conflicts or is missing. No shipment fields, Last T&T Update, or workflow status were changed by this failed lookup.",
+            "", "CORRECTIVE ACTION - TASK ASSIGNEE:",
+            "1. Open the carrier source link above and verify the booking and its assigned containers against the latest booking confirmation or bill of lading, including any booking split or reassignment.",
+            "2. If this task has an incorrect reference, correct only the affected booking/container fields using confirmed evidence. If the task references are correct but ONE's records conflict, ask ONE or the booking party to confirm or correct the allocation. Do not guess a replacement reference or change the shipment status just to bypass this check.",
+            "3. Reply in this task with the confirmed booking, container list, supporting source, and any correction made. If unresolved, state what is still missing and who is confirming it.",
+            "4. After the references are resolved, rerun Track & Trace or allow the next scheduled run. Automatic updates can resume only when the carrier response passes the shipment identity checks.",
+        ])
+        parts: list[dict[str, Any]] = [{"text": text + "\nOwners: "}]
+        if owners:
+            for owner in owners:
+                parts.extend([{"type": "tag", "user": {"id": owner}}, {"text": " "}])
+        else:
+            parts.append({"text": "No task assignee is set. Please assign an owner for this review."})
+        # Never automatically retry an ambiguous comment POST; the next run checks history first.
+        response = self.session.post(f"{self.base_url}/task/{shipment.task_id}/comment",
+                                     json={"comment": parts, "notify_all": False}, timeout=30)
+        response.raise_for_status()
+        if not response.json().get("id"):
+            raise ValueError("ONE conflict comment response has no comment identity")
+        return True
+
+    def _recent_conflict_comment_exists(self, task_id: str, marker: str) -> bool:
+        now = datetime.now(timezone.utc)
+        params: dict[str, Any] = {}
+        seen = set()
+        for _ in range(10):
+            response = self._request("get", f"{self.base_url}/task/{task_id}/comment", params=params, timeout=30)
+            response.raise_for_status()
+            comments = response.json().get("comments")
+            if not isinstance(comments, list):
+                raise ValueError("ONE conflict comment history is unavailable")
+            for comment in comments:
+                created = _parse_datetime_value(comment.get("date"))
+                if created is None:
+                    raise ValueError("ONE conflict comment history has no timestamp")
+                if (now - created).total_seconds() <= 86400 and marker in "\n".join(_comment_reference_texts(comment)):
+                    return True
+            if len(comments) < 25 or all(
+                    (now - _parse_datetime_value(c["date"])).total_seconds() > 86400 for c in comments):
+                return False
+            cursor = (comments[-1].get("date"), comments[-1].get("id"))
+            if not all(cursor) or cursor in seen:
+                raise ValueError("ONE conflict comment history pagination is incomplete")
+            seen.add(cursor)
+            params = {"start": cursor[0], "start_id": cursor[1]}
+        raise ValueError("ONE conflict comment history exceeded the safety limit")
 
     def report_msc_container_review_issue(self, shipment: ShipmentRef, *, error: str) -> bool:
         """Record a non-mutating multi-container MSC review problem once."""
