@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-import requests
 from pathlib import Path
 import sys
 from tempfile import NamedTemporaryFile
@@ -26,6 +25,7 @@ from shipment_sync.msc_browser_assisted import (
     write_queue,
 )
 from shipment_sync.terminal import terminal_safe_text
+from shipment_sync.sync import _notify_tracking_failure
 
 
 def main() -> None:
@@ -137,6 +137,8 @@ def _record_outcome(path, task_id, outcome, **details):
 
 
 def _import_batch(client: ClickUpClient, shipments, captures, failures, *, apply: bool, report_path=None) -> None:
+    if apply:
+        client._tracking_notice_delivery_failures = 0
     shipments_by_id = {shipment.task_id: shipment for shipment in shipments}
     requested_ids = {item.task_id for item in [*captures, *failures]}
     unknown_ids = sorted(requested_ids - set(shipments_by_id))
@@ -148,6 +150,7 @@ def _import_batch(client: ClickUpClient, shipments, captures, failures, *, apply
     updated = 0
     unchanged = 0
     failure_comments = 0
+    written_ids = set()
     captures_by_task: dict[str, list] = {}
     for item in captures:
         captures_by_task.setdefault(item.task_id, []).append(item)
@@ -160,7 +163,7 @@ def _import_batch(client: ClickUpClient, shipments, captures, failures, *, apply
         try:
             parsed = [(item, status_from_browser_capture(item.capture)) for item in task_captures]
             status = consolidate_browser_statuses(shipment, parsed)
-        except ValueError as exc:
+        except Exception as exc:
             error = str(exc)
             _record_outcome(report_path, task_id, "rejected", evidence_hash=evidence_hash, reason=error)
             print(
@@ -172,22 +175,30 @@ def _import_batch(client: ClickUpClient, shipments, captures, failures, *, apply
                 try:
                     if client.report_msc_container_review_issue(shipment, error=error):
                         failure_comments += 1
-                except requests.RequestException:
+                except Exception:
                     _record_outcome(report_path, task_id, "diagnostic_uncertain")
                     print(terminal_safe_text(f"MSC task={task_id}: diagnostic delivery uncertain"))
             continue
-        plan = client.plan_shipment_update(shipment, status)
+        try:
+            plan = client.plan_shipment_update(shipment, status)
+        except Exception as exc:
+            _record_outcome(report_path, task_id, 'projection_rejected', evidence_hash=evidence_hash)
+            if apply:
+                failure_comments += int(_notify_tracking_failure(client, shipment, str(exc), phase='projection', method='browser capture/import'))
+            continue
         _print_preview_plan(shipment, plan)
         if apply:
             _record_outcome(report_path, task_id, "write_started", evidence_hash=evidence_hash)
             try:
                 result = client.update_shipment_status(shipment, status)
-            except requests.RequestException:
+            except Exception as exc:
                 # A timeout can occur after a partial write. Do not automatically
                 # replay or stamp success; re-read ClickUp before resuming it.
                 _record_outcome(report_path, task_id, "write_uncertain", evidence_hash=evidence_hash)
                 print(terminal_safe_text(f"MSC task={task_id}: write uncertain; verify ClickUp before retrying"))
+                failure_comments += int(_notify_tracking_failure(client, shipment, str(exc), phase='writeback', method='browser capture/import'))
                 continue
+            written_ids.add(task_id)
             _record_outcome(report_path, task_id, "write_accepted", evidence_hash=evidence_hash, changed=result.changed)
             if result.changed:
                 updated += 1
@@ -209,9 +220,11 @@ def _import_batch(client: ClickUpClient, shipments, captures, failures, *, apply
         _record_outcome(report_path, item.task_id, "carrier_failure", reference=item.reference)
         if apply:
             try:
-                if client.report_msc_tracking_failure(shipment, reference=item.reference, error=item.error):
+                if item.task_id in written_ids:
+                    failure_comments += int(_notify_tracking_failure(client, shipment, item.error, phase='writeback', method='browser capture/import'))
+                elif client.report_msc_tracking_failure(shipment, reference=item.reference, error=item.error):
                     failure_comments += 1
-            except requests.RequestException:
+            except Exception:
                 _record_outcome(report_path, item.task_id, "diagnostic_uncertain")
                 print(terminal_safe_text(f"MSC task={item.task_id}: diagnostic delivery uncertain"))
 

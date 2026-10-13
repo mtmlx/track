@@ -134,7 +134,9 @@ def conflict_client(monkeypatch):
     c=ClickUpClient(_settings())
     task={'id':'t','status':{'status':'Pendiente de booking'},'assignees':[{'id':12},{'id':34}],
           'custom_fields':[{'id':c.settings.cf_booking_no,'value':'BOOK'},
-                           {'id':c.settings.cf_container_no,'value':'ONEU2154315'}]}
+                           {'id':c.settings.cf_container_no,'value':'ONEU2154315'},
+                           {'id':c.settings.cf_shipping_line,'value':'one'},
+                           {'id':'303d68fa-f250-43ac-abe8-17b70e07b46d','value':'PUERTO QUETZAL'}]}
     history=[]; posts=[]; reads=[]
     class Response:
         def __init__(self,data): self.data=data
@@ -157,7 +159,7 @@ def test_booking_conflict_mentions_current_owners_and_deduplicates(monkeypatch):
     assert c.report_one_booking_conflict(shipment())
     assert [p['user']['id'] for p in posts[0]['comment'] if p.get('type')=='tag']==[12,34]
     assert posts[0]['notify_all'] is False
-    assert 'No shipment fields' in posts[0]['comment'][0]['text']
+    assert 'did not write shipment fields' in posts[0]['comment'][0]['text']
     text = posts[0]['comment'][0]['text']
     for section in ('ISSUE:', 'IMPACT:', 'WHY WE CANNOT PROCEED:',
                     'CORRECTIVE ACTION - TASK ASSIGNEE:'):
