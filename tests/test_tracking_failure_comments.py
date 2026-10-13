@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from urllib.parse import urlsplit
 
 import pytest
 import requests
@@ -97,7 +98,10 @@ def test_wan_hai_recovery_keeps_full_screen_tracy_instructions(monkeypatch):
     text = posts[0]['comment'][0]['text']
     assert 'Wan Hai Manual Capture needed' in text
     assert 'entire result screen/page' in text and 'TracyAI' in text
-    assert 'https://www.wanhai.com/' in text
+    carrier_url = next(line.removeprefix('Carrier source: ') for line in text.splitlines()
+                       if line.startswith('Carrier source: '))
+    assert urlsplit(carrier_url).scheme == 'https'
+    assert urlsplit(carrier_url).hostname == 'www.wanhai.com'
 
 
 def test_wan_hai_manual_capture_opt_out_is_preserved(monkeypatch):
