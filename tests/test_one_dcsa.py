@@ -118,6 +118,9 @@ def test_booking_fallback_never_masks_dcsa_authentication_failure(monkeypatch):
     ('ONE booking lookup identity mismatch', True),
     ('ONE booking lifecycle event lacks matching booking identity', True),
     ('ONE DCSA booking does not include the listed containers', True),
+    ('ONE DCSA returned a conflicting container', True),
+    ('ONE DCSA mapped an unexpected container population', True),
+    ('ONE DCSA container population does not match the shipment count', True),
     ('ONE booking lookup is unavailable or incomplete', False),
     ('ONE DCSA HTTP 403', False),
 ])

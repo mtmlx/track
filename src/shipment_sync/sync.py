@@ -412,6 +412,9 @@ def _one_booking_conflict(shipping_line: str, message: str) -> bool:
         "ONE booking lookup identity mismatch",
         "ONE booking lifecycle event lacks matching booking identity",
         "ONE DCSA booking does not include the listed containers",
+        "ONE DCSA returned a conflicting container",
+        "ONE DCSA mapped an unexpected container population",
+        "ONE DCSA container population does not match the shipment count",
     }
 
 
