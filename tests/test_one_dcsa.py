@@ -155,6 +155,14 @@ def test_booking_conflict_mentions_current_owners_and_deduplicates(monkeypatch):
     assert [p['user']['id'] for p in posts[0]['comment'] if p.get('type')=='tag']==[12,34]
     assert posts[0]['notify_all'] is False
     assert 'No shipment fields' in posts[0]['comment'][0]['text']
+    text = posts[0]['comment'][0]['text']
+    for section in ('ISSUE:', 'IMPACT:', 'WHY WE CANNOT PROCEED:',
+                    'CORRECTIVE ACTION - TASK ASSIGNEE:'):
+        assert section in text
+    assert 'shipment documents, and manifests' in text
+    assert 'Do not guess a replacement reference' in text
+    assert 'supporting source' in text
+    assert 'passes the shipment identity checks' in text
     history.append({'id':'comment-1','date':str(int(datetime.now(timezone.utc).timestamp()*1000)),
                     'comment':posts[0]['comment']})
     assert not c.report_one_booking_conflict(shipment())

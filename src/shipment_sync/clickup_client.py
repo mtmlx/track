@@ -988,14 +988,18 @@ class ClickUpClient:
         booking = shipment.booking_no or "not set"
         containers = shipment.container_no or "not assigned"
         text = "\n".join([
-            marker, "", "Track & Trace was held because ONE's booking/container response did not match this shipment.",
+            marker, "", "ISSUE: ONE's tracking response conflicts with this task's booking/container references, or does not provide enough matching identity evidence to confirm that it belongs to this shipment.",
             f"Booking checked: {booking}", f"Containers checked: {containers}",
             "Carrier source: https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam="
             + quote(shipment.booking_no or shipment.container_no or "", safe="")
             + ("&trakNoTpCdParam=B" if shipment.booking_no else "&trakNoTpCdParam=C"),
-            "No shipment fields, Last T&T Update, or workflow status were changed by this failed lookup.", "",
-            "Please confirm the booking and container allocation with ONE or the booking party, correct the references if needed, and reply here with the confirmed details. Then rerun Track & Trace.",
-            "This will keep customer tracking and shipment documents aligned.",
+            "", "IMPACT: Automatic tracking for this shipment is paused for this lookup. Dates, vessel/voyage, container details, and status may remain out of date. Using conflicting carrier data could assign another booking's information to this shipment and affect customer visibility, shipment documents, and manifests.",
+            "", "WHY WE CANNOT PROCEED: We cannot safely establish that the carrier response belongs to the booking and containers recorded here. A booking number alone is not sufficient when the identity evidence conflicts or is missing. No shipment fields, Last T&T Update, or workflow status were changed by this failed lookup.",
+            "", "CORRECTIVE ACTION - TASK ASSIGNEE:",
+            "1. Open the carrier source link above and verify the booking and its assigned containers against the latest booking confirmation or bill of lading, including any booking split or reassignment.",
+            "2. If this task has an incorrect reference, correct only the affected booking/container fields using confirmed evidence. If the task references are correct but ONE's records conflict, ask ONE or the booking party to confirm or correct the allocation. Do not guess a replacement reference or change the shipment status just to bypass this check.",
+            "3. Reply in this task with the confirmed booking, container list, supporting source, and any correction made. If unresolved, state what is still missing and who is confirming it.",
+            "4. After the references are resolved, rerun Track & Trace or allow the next scheduled run. Automatic updates can resume only when the carrier response passes the shipment identity checks.",
         ])
         parts: list[dict[str, Any]] = [{"text": text + "\nOwners: "}]
         if owners:
