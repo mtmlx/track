@@ -11,7 +11,6 @@ import sys
 import time
 import unicodedata
 from typing import Any
-from urllib.parse import quote
 
 import requests
 
@@ -27,6 +26,7 @@ from .models import (
     ShipmentUpdatePlan,
     ShipmentWriteResult,
 )
+from .tracking_failures import carrier_name, classify_failure, failure_comment
 
 
 class ClickUpWorkloadLimitError(RuntimeError):
@@ -890,7 +890,12 @@ class ClickUpClient:
         )
 
     def update_shipment_status(self, shipment: ShipmentRef, status: ShipmentStatus) -> ShipmentWriteResult:
-        plan = self.plan_shipment_update(shipment, status)
+        try:
+            plan = self.plan_shipment_update(shipment, status)
+        except Exception as exc:
+            # Preserve the original exception contract while identifying a read-only failure.
+            exc.shipment_sync_phase = 'projection'
+            raise
 
         for update in plan.custom_field_updates:
             if update.field_type == "datetime":
@@ -908,6 +913,10 @@ class ClickUpClient:
                     f"Task status update failed for {shipment.task_id}: {exc}",
                     file=sys.stderr,
                 )
+                try:
+                    self.report_tracking_failure(shipment, error='ClickUp task status update failed', phase='writeback')
+                except Exception as notice_exc:
+                    print(f'T&T failure comment not verified for task {shipment.task_id}: {type(notice_exc).__name__}', file=sys.stderr)
 
         if plan.comment_text:
             self._post_comment(shipment.task_id, plan.comment_text)
@@ -920,57 +929,67 @@ class ClickUpClient:
     def request_wan_hai_manual_capture(self, shipment: ShipmentRef, *, error: str | None = None) -> bool:
         if not self.settings.wan_hai_manual_capture_comment:
             return False
-        if self._recent_wan_hai_manual_capture_comment_exists(shipment.task_id):
-            return False
-        self._post_comment(shipment.task_id, _wan_hai_manual_capture_comment(shipment, self.settings, error=error))
-        return True
+        return self.report_tracking_failure(shipment, error=error or 'anti-bot access blocked',
+                                            method='automated/browser',
+                                            cooldown_hours=self.settings.wan_hai_manual_capture_comment_cooldown_hours)
 
     def report_msc_tracking_failure(self, shipment: ShipmentRef, *, reference: str, error: str) -> bool:
-        """Post a concise, idempotent carrier diagnostic without mutating shipment data."""
-        marker = "MSC Track & Trace exception"
-        try:
-            comments = self._fetch_recent_task_comments(shipment.task_id, limit=10)
-        except requests.RequestException as exc:
-            print(f"MSC failure comment cooldown check skipped for task {shipment.task_id}: {exc}", file=sys.stderr)
-            comments = []
-        normalized_reference = reference.strip().upper()
-        for raw in comments:
-            text = "\n".join(_comment_reference_texts(raw))
-            if marker in text and normalized_reference in text.upper():
-                return False
-        self._post_comment(
-            shipment.task_id,
-            "\n".join(
-                [
-                    marker,
-                    "",
-                    "MSC returned no usable tracking result during the normal public-browser review.",
-                    f"Reference checked: {reference}",
-                    f"Error: {error}",
-                    f"Carrier source: https://www.msc.com/en/track-a-shipment",
-                    "",
-                    "This failed reference did not change shipment fields, Last T&T Update, or workflow status.",
-                    "Action required: verify the booking/container reference with MSC or the booking party, then rerun Track & Trace.",
-                ]
-            ),
-        )
-        return True
+        return self.report_tracking_failure(shipment, error=error, reference=reference, method='browser capture/import')
 
     def report_one_booking_conflict(self, shipment: ShipmentRef) -> bool:
-        """Notify current owners of a held reference, without changing shipment data."""
-        if shipment.shipping_line.strip().lower() != "one":
+        if carrier_name(shipment.shipping_line) != 'ONE':
             return False
+        return self.report_tracking_failure(shipment, error='ONE DCSA returned a conflicting booking')
+
+    def report_tracking_failure(self, shipment: ShipmentRef, *, error: str, phase: str = 'lookup',
+                                method: str = 'automated carrier adapter', reference: str | None = None,
+                                cooldown_hours: int = 24) -> bool:
+        if getattr(self, '_tracking_notice_delivery_failures', 0) >= 3:
+            return False
+        try:
+            return self._report_tracking_failure(shipment, error=error, phase=phase,
+                method=method, reference=reference, cooldown_hours=cooldown_hours)
+        except Exception:
+            self._tracking_notice_delivery_failures = getattr(self, '_tracking_notice_delivery_failures', 0) + 1
+            if self._tracking_notice_delivery_failures == 3:
+                print('T&T failure comment delivery paused after three failures; consult run logs. Shipment processing continues.', file=sys.stderr)
+            raise
+
+    def _report_tracking_failure(self, shipment: ShipmentRef, *, error: str, phase: str,
+                                 method: str, reference: str | None, cooldown_hours: int) -> bool:
+        """Comment once per issue/day, mentioning fresh owners; never retry the POST."""
         response = self._request("get", f"{self.base_url}/task/{shipment.task_id}", timeout=30)
         response.raise_for_status()
         task = response.json()
         if task.get("id") != shipment.task_id:
-            raise ValueError("ONE conflict comment task identity mismatch")
+            raise ValueError("Tracking failure comment task identity mismatch")
+        def signature(value):
+            return json.dumps([value.get('custom_fields'), value.get('status'),
+                sorted(int(u['id']) for u in value.get('assignees') or [])], sort_keys=True)
+        task_signature = signature(task)
         fields = _field_map(task.get("custom_fields") or [])
+        current_line = _field_text(fields.get(self.settings.cf_shipping_line))
+        if not current_line:
+            return False
+        if carrier_name(current_line) != carrier_name(shipment.shipping_line):
+            return False
+        if carrier_name(current_line) == 'Carrier' and current_line.lower() != shipment.shipping_line.lower():
+            return False
         for field_id, expected in ((self.settings.cf_booking_no, shipment.booking_no),
                                    (self.settings.cf_container_no, shipment.container_no)):
             current = _field_text(fields.get(field_id))
             if (current or "").strip().upper() != (expected or "").strip().upper():
                 return False  # A human has already changed the reference since this lookup.
+        if _expected_container_count(task.get('custom_fields')) != shipment.expected_container_count:
+            return False
+        current_destination = _shipment_destination(fields)
+        if (current_destination != shipment.destination_port
+                and not same_port(current_destination, shipment.destination_port)):
+            return False
+        if phase not in {'writeback', 'partial_browser_batch'} and self.settings.cf_status_last_checked:
+            current_checked = _parse_last_checked(fields.get(self.settings.cf_status_last_checked))
+            if current_checked is not None and (shipment.last_checked_at is None or current_checked > shipment.last_checked_at):
+                return False  # A later successful run supersedes this failed lookup.
         status = task.get("status") or {}
         if isinstance(status, dict):
             status = status.get("status") or ""
@@ -979,43 +998,49 @@ class ClickUpClient:
             return False
         owners = sorted({int(user["id"]) for user in task.get("assignees") or []
                          if isinstance(user, dict) and str(user.get("id", "")).isdigit()})
-        fingerprint = hashlib.sha256(json.dumps(
-            [shipment.task_id, shipment.booking_no, shipment.container_no, owners],
-            separators=(",", ":")).encode()).hexdigest()[:24]
-        marker = f"ONE T&T booking conflict [{fingerprint}]"
-        if self._recent_conflict_comment_exists(shipment.task_id, marker):
+        notice = classify_failure(shipment, error, phase=phase)
+        if (carrier_name(shipment.shipping_line) == 'Wan Hai' and notice.category == 'carrier_blocked'
+                and not self.settings.wan_hai_manual_capture_comment):
             return False
-        booking = shipment.booking_no or "not set"
-        containers = shipment.container_no or "not assigned"
-        text = "\n".join([
-            marker, "", "ISSUE: ONE's tracking response conflicts with this task's booking/container references, or does not provide enough matching identity evidence to confirm that it belongs to this shipment.",
-            f"Booking checked: {booking}", f"Containers checked: {containers}",
-            "Carrier source: https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam="
-            + quote(shipment.booking_no or shipment.container_no or "", safe="")
-            + ("&trakNoTpCdParam=B" if shipment.booking_no else "&trakNoTpCdParam=C"),
-            "", "IMPACT: Automatic tracking for this shipment is paused for this lookup. Dates, vessel/voyage, container details, and status may remain out of date. Using conflicting carrier data could assign another booking's information to this shipment and affect customer visibility, shipment documents, and manifests.",
-            "", "WHY WE CANNOT PROCEED: We cannot safely establish that the carrier response belongs to the booking and containers recorded here. A booking number alone is not sufficient when the identity evidence conflicts or is missing. No shipment fields, Last T&T Update, or workflow status were changed by this failed lookup.",
-            "", "CORRECTIVE ACTION - TASK ASSIGNEE:",
-            "1. Open the carrier source link above and verify the booking and its assigned containers against the latest booking confirmation or bill of lading, including any booking split or reassignment.",
-            "2. If this task has an incorrect reference, correct only the affected booking/container fields using confirmed evidence. If the task references are correct but ONE's records conflict, ask ONE or the booking party to confirm or correct the allocation. Do not guess a replacement reference or change the shipment status just to bypass this check.",
-            "3. Reply in this task with the confirmed booking, container list, supporting source, and any correction made. If unresolved, state what is still missing and who is confirming it.",
-            "4. After the references are resolved, rerun Track & Trace or allow the next scheduled run. Automatic updates can resume only when the carrier response passes the shipment identity checks.",
-        ])
+        fingerprint = hashlib.sha256(json.dumps(
+            [shipment.task_id, carrier_name(shipment.shipping_line), shipment.booking_no,
+             shipment.container_no, shipment.expected_container_count, notice.category,
+             (reference or '').strip().upper(), owners],
+            separators=(",", ":")).encode()).hexdigest()[:24]
+        marker = f"T&T failure notice [{fingerprint}]"
+        legacy_markers = ()
+        if carrier_name(shipment.shipping_line) == 'ONE' and notice.category == 'identity_conflict':
+            old_hash = hashlib.sha256(json.dumps([shipment.task_id, shipment.booking_no,
+                shipment.container_no, owners], separators=(',', ':')).encode()).hexdigest()[:24]
+            legacy_markers = (f'ONE T&T booking conflict [{old_hash}]',)
+        if self._recent_conflict_comment_exists(shipment.task_id, marker,
+                cooldown_hours=cooldown_hours, legacy_markers=legacy_markers):
+            return False
+        text = marker + '\n\n' + failure_comment(shipment, notice, method=method, phase=phase, reference=reference)
         parts: list[dict[str, Any]] = [{"text": text + "\nOwners: "}]
         if owners:
             for owner in owners:
                 parts.extend([{"type": "tag", "user": {"id": owner}}, {"text": " "}])
         else:
             parts.append({"text": "No task assignee is set. Please assign an owner for this review."})
+        fresh = self._request('get', f'{self.base_url}/task/{shipment.task_id}', timeout=30)
+        fresh.raise_for_status()
+        latest = fresh.json()
+        if latest.get('id') != shipment.task_id or signature(latest) != task_signature:
+            return False
         # Never automatically retry an ambiguous comment POST; the next run checks history first.
         response = self.session.post(f"{self.base_url}/task/{shipment.task_id}/comment",
                                      json={"comment": parts, "notify_all": False}, timeout=30)
         response.raise_for_status()
         if not response.json().get("id"):
-            raise ValueError("ONE conflict comment response has no comment identity")
+            raise ValueError("Tracking failure comment response has no comment identity")
         return True
 
-    def _recent_conflict_comment_exists(self, task_id: str, marker: str) -> bool:
+    def _recent_conflict_comment_exists(self, task_id: str, marker: str, *, cooldown_hours: int = 24,
+                                        legacy_markers: tuple[str, ...] = ()) -> bool:
+        if cooldown_hours <= 0:
+            return False
+        cooldown_seconds = cooldown_hours * 3600
         now = datetime.now(timezone.utc)
         params: dict[str, Any] = {}
         seen = set()
@@ -1024,49 +1049,27 @@ class ClickUpClient:
             response.raise_for_status()
             comments = response.json().get("comments")
             if not isinstance(comments, list):
-                raise ValueError("ONE conflict comment history is unavailable")
+                raise ValueError("Tracking failure comment history is unavailable")
             for comment in comments:
                 created = _parse_datetime_value(comment.get("date"))
                 if created is None:
-                    raise ValueError("ONE conflict comment history has no timestamp")
-                if (now - created).total_seconds() <= 86400 and marker in "\n".join(_comment_reference_texts(comment)):
+                    raise ValueError("Tracking failure comment history has no timestamp")
+                text = '\n'.join(_comment_reference_texts(comment))
+                if ((now - created).total_seconds() <= cooldown_seconds
+                        and any(value in text for value in (marker, *legacy_markers))):
                     return True
             if len(comments) < 25 or all(
-                    (now - _parse_datetime_value(c["date"])).total_seconds() > 86400 for c in comments):
+                    (now - _parse_datetime_value(c["date"])).total_seconds() > cooldown_seconds for c in comments):
                 return False
             cursor = (comments[-1].get("date"), comments[-1].get("id"))
             if not all(cursor) or cursor in seen:
-                raise ValueError("ONE conflict comment history pagination is incomplete")
+                raise ValueError("Tracking failure comment history pagination is incomplete")
             seen.add(cursor)
             params = {"start": cursor[0], "start_id": cursor[1]}
-        raise ValueError("ONE conflict comment history exceeded the safety limit")
+        raise ValueError("Tracking failure comment history exceeded the safety limit")
 
     def report_msc_container_review_issue(self, shipment: ShipmentRef, *, error: str) -> bool:
-        """Record a non-mutating multi-container MSC review problem once."""
-        marker = "MSC Track & Trace container review"
-        try:
-            comments = self._fetch_recent_task_comments(shipment.task_id, limit=10)
-        except requests.RequestException as exc:
-            print(f"MSC review comment cooldown check skipped for task {shipment.task_id}: {exc}", file=sys.stderr)
-            comments = []
-        if any(marker in "\n".join(_comment_reference_texts(raw)) for raw in comments):
-            return False
-        self._post_comment(
-            shipment.task_id,
-            "\n".join(
-                [
-                    marker,
-                    "",
-                    "MSC results were reviewed per container but are incomplete or disagree on shipment-level tracking data.",
-                    f"Error: {error}",
-                    "Carrier source: https://www.msc.com/en/track-a-shipment",
-                    "",
-                    "No shipment fields, Last T&T Update, or workflow status were changed.",
-                    "Action required: verify every listed container with MSC, then rerun Track & Trace.",
-                ]
-            ),
-        )
-        return True
+        return self.report_tracking_failure(shipment, error=error, method='browser capture/import')
 
     def _recent_wan_hai_manual_capture_comment_exists(self, task_id: str) -> bool:
         cooldown_hours = self.settings.wan_hai_manual_capture_comment_cooldown_hours

@@ -81,6 +81,7 @@ def _run_sync(
         )
 
     updated_items: list[UpdatedShipment] = []
+    client._tracking_notice_delivery_failures = 0
     unchanged = 0
     skipped = 0
     candidates_by_list: dict[str, int] = {}
@@ -180,6 +181,7 @@ def _run_sync(
             for shipment in eligible_shipments:
                 reason = preflight_failures.get(shipment.shipping_line)
                 if reason:
+                    _notify_tracking_failure(client, shipment, reason, phase='preflight')
                     failed_counts[shipment.shipping_line] = failed_counts.get(shipment.shipping_line, 0) + 1
                     if audit is not None:
                         audit.log_task(
@@ -217,6 +219,7 @@ def _run_sync(
 
         access_failure = carrier_access_failures.get(shipment.shipping_line)
         if access_failure is not None:
+            _notify_tracking_failure(client, shipment, access_failure, phase='not_queried')
             skipped += 1
             if audit is not None:
                 audit.log_task(
@@ -228,6 +231,7 @@ def _run_sync(
 
         adapter = adapters.get(shipment.shipping_line)
         if not adapter:
+            _notify_tracking_failure(client, shipment, 'No adapter registered for carrier')
             unsupported_line_counts[shipment.shipping_line] = unsupported_line_counts.get(shipment.shipping_line, 0) + 1
             if audit is not None:
                 audit.log_task(
@@ -238,8 +242,10 @@ def _run_sync(
             skipped += 1
             continue
 
+        failure_phase = 'lookup'
         try:
             status = _fetch_carrier_status(adapter, shipment)
+            failure_phase = 'writeback'
             write_result = client.update_shipment_status(shipment, status)
             if write_result.changed:
                 updated_items.append(
@@ -282,13 +288,16 @@ def _run_sync(
                         message=write_result.status_value,
                     )
         except Exception as exc:
+            if failure_phase == 'writeback' and getattr(exc, 'shipment_sync_phase', None) == 'projection':
+                failure_phase = 'projection'
             message = str(exc)
-            if _carrier_access_denied(shipment.shipping_line, message):
+            if failure_phase == 'lookup' and _carrier_access_denied(shipment.shipping_line, message):
                 carrier_access_failures[shipment.shipping_line] = message
                 message = (
                     f"{message}. Carrier circuit breaker opened; remaining "
                     f"{shipment.shipping_line} shipments will not be queried in this run."
                 )
+            _notify_tracking_failure(client, shipment, message, phase=failure_phase)
             if "adapter not configured" in message.lower():
                 key = f"{shipment.shipping_line}: {message}"
                 adapter_config_counts[key] = adapter_config_counts.get(key, 0) + 1
@@ -300,28 +309,6 @@ def _run_sync(
                     )
                 skipped += 1
                 continue
-            if _wan_hai_manual_capture_needed(shipment.shipping_line, message):
-                try:
-                    posted = client.request_wan_hai_manual_capture(shipment, error=message)
-                except Exception as comment_exc:
-                    posted = False
-                    print(
-                        terminal_safe_text(f"Wan Hai manual capture comment failed for task {shipment.task_id}: {comment_exc}"),
-                        file=sys.stderr,
-                    )
-                if posted:
-                    print(
-                        terminal_safe_text(f"Wan Hai manual capture requested for task {shipment.task_id} ({shipment.task_name})."),
-                        file=sys.stderr,
-                    )
-            if _one_booking_conflict(shipment.shipping_line, message):
-                try:
-                    if client.report_one_booking_conflict(shipment):
-                        print(f"ONE booking conflict comment posted for task {shipment.task_id}.", file=sys.stderr)
-                except Exception as comment_exc:
-                    print(terminal_safe_text(
-                        f"ONE booking conflict comment failed for task {shipment.task_id}: {comment_exc}"),
-                        file=sys.stderr)
             print(
                 terminal_safe_text(f"Skipped task {shipment.task_id} ({shipment.task_name}): {exc}"),
                 file=sys.stderr,
@@ -388,6 +375,26 @@ def _list_label(list_name: str | None, list_id: str) -> str:
     if list_name and list_name.strip():
         return f"{list_name.strip()} ({list_id})"
     return list_id
+
+
+def _notify_tracking_failure(client: ClickUpClient, shipment: ShipmentRef, error: str,
+                             *, phase: str = 'lookup', method: str = 'automated carrier adapter',
+                             reference: str | None = None) -> bool:
+    try:
+        if phase == 'lookup' and _wan_hai_manual_capture_needed(shipment.shipping_line, error):
+            posted = client.request_wan_hai_manual_capture(shipment, error=error)
+        elif phase == 'lookup' and _one_booking_conflict(shipment.shipping_line, error):
+            posted = client.report_one_booking_conflict(shipment)
+        else:
+            posted = client.report_tracking_failure(shipment, error=error, phase=phase, method=method, reference=reference)
+        if posted:
+            print(terminal_safe_text(f'T&T failure comment posted for task {shipment.task_id}.'), file=sys.stderr)
+        return posted
+    except Exception as exc:
+        # Notification delivery must not stop other shipments or expose raw HTTP data.
+        print(terminal_safe_text(
+            f'T&T failure comment not verified for task {shipment.task_id}: {type(exc).__name__}'), file=sys.stderr)
+        return False
 
 
 def _terminal_shipment_status(status: str | None, terminal_statuses: tuple[str, ...]) -> str | None:

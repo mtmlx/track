@@ -82,6 +82,8 @@ def write_queue(path: Path, items: Iterable[MscBrowserQueueItem]) -> None:
             "Copy each container's complete movements with the booking/BL header, Port of Discharge and Shipped To labels.",
             "Do not import a capture without a matching booking/BL and a verified shipment destination.",
             "Use msc-browser-assisted --preview-capture before any ClickUp update.",
+            "Record every failed lookup in the import batch failures list with task_id, reference, and a concise error; never include credentials or silently omit a failed shipment.",
+            "An approved --apply import posts guarded failure comments with current-assignee mentions; preview mode posts no comments.",
             "Do not solve or bypass a CAPTCHA or access-control challenge programmatically.",
         ],
         "shipments": [asdict(item) for item in items],
