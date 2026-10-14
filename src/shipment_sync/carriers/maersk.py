@@ -886,6 +886,12 @@ def _event_to_movement(event: dict) -> MovementEvent:
     )
     classifier = _event_classifier(event)
     location_code = _event_location_code(event)
+    transport_call = event.get("transportCall")
+    mode_sources = [event, transport_call] if isinstance(transport_call, dict) else [event]
+    modes = {
+        str(source["modeOfTransport"]).strip().upper()
+        for source in mode_sources if source.get("modeOfTransport")
+    }
     return MovementEvent(
         name=name,
         location=location,
@@ -894,6 +900,8 @@ def _event_to_movement(event: dict) -> MovementEvent:
         event_state=_normalize_event_state(classifier),
         vessel_voyage=extract_event_vessel_voyage(event),
         location_code=location_code,
+        transport_mode=next(iter(modes)) if len(modes) == 1 else None,
+        event_occurrence_time=parse_event_time(event.get("eventDateTime")),
     )
 
 

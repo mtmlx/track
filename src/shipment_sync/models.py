@@ -55,6 +55,8 @@ class MovementEvent:
     source_event_name: str | None = None
     location_code: str | None = None
     equipment_load_state: str | None = None
+    transport_mode: str | None = None
+    event_occurrence_time: datetime | None = None
 
 
 @dataclass
