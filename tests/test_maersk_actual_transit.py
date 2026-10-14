@@ -19,7 +19,7 @@ def _plan(code="LOAD", classifier="ACT", mode="VESSEL", days=-4, extra=None,
     shipment = ShipmentRef("86e3dgd2j", "MTMLXGT-33773", carrier, "277740394",
         "MRSU8843754", "list", current_task_status=current, destination_port="GTPBR")
     status = ShipmentStatus("Tracking", eta_time=now + timedelta(days=4),
-        destination_port="GTPBR", recent_moves=[_event_to_movement(event)],
+        recent_moves=[_event_to_movement(event)],
         booking_only=booking_only)
     return ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(shipment, status)
 
@@ -55,6 +55,14 @@ def test_later_or_terminal_status_is_not_regressed(current):
 
 def test_repeated_transit_preview_is_idempotent():
     assert _plan(current="tránsito").task_status_update is None
+
+
+@pytest.mark.parametrize("carrier", ["maersk", "maersk line", "a.p. moller - maersk"])
+@pytest.mark.parametrize("code", ["LOAD", "DEPA"])
+def test_all_maersk_aliases_use_authoritative_shipment_destination(carrier, code):
+    assert _plan(carrier=carrier, code=code, extra={
+        "transportCall": {"modeOfTransport": "VESSEL", "UNLocationCode": "GTPBR"}
+    }).task_status_update is None
 
 
 def test_occurrence_time_and_transport_mode_are_preserved():

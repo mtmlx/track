@@ -683,7 +683,7 @@ class ClickUpClient:
         return comments
 
     def plan_shipment_update(self, shipment: ShipmentRef, status: ShipmentStatus) -> ShipmentUpdatePlan:
-        if shipment.shipping_line.strip().lower() == "maersk":
+        if carrier_name(shipment.shipping_line) == "Maersk":
             # Partial feeds cannot establish destination from the last DISC.
             status = replace(status, require_destination_evidence=True,
                              destination_port=shipment.destination_port)
@@ -1525,7 +1525,7 @@ def _derive_operational_status_step(
             target_step = _max_workflow_step(target_step, "arriving")
 
     # Vessel movement proves transit even when the carrier omits origin gates.
-    if (shipment.shipping_line.strip().lower() in {"maersk", "maersk line", "a.p. moller - maersk"}
+    if (carrier_name(shipment.shipping_line) == "Maersk"
             and eta_date is not None and eta_date > today
             and _has_actual_maersk_vessel_transit(status, now_utc=now_utc)):
         target_step = _max_workflow_step(target_step, "in_transit")
