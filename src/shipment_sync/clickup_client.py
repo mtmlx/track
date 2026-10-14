@@ -1524,6 +1524,14 @@ def _derive_operational_status_step(
         if 5 <= (eta_date - today).days <= 10:
             target_step = _max_workflow_step(target_step, "arriving")
 
+    # Vessel movement proves transit even when the carrier omits origin gates.
+    if (shipment.shipping_line.strip().lower() in {"maersk", "maersk line", "a.p. moller - maersk"}
+            and eta_date is not None and eta_date > today
+            and _has_actual_maersk_vessel_transit(status, now_utc=now_utc)):
+        target_step = _max_workflow_step(target_step, "in_transit")
+        if 5 <= (eta_date - today).days <= 10:
+            target_step = _max_workflow_step(target_step, "arriving")
+
     if gate_out_empty_date is not None and gate_in_full_date is None:
         target_step = _max_workflow_step(target_step, "collected")
 
@@ -2275,6 +2283,21 @@ def _normalize_date_only(value: datetime) -> datetime:
 
 def _move_is_actual(move: MovementEvent) -> bool:
     return _normalize_event_state(move.event_state) == "actual"
+
+
+def _has_actual_maersk_vessel_transit(status: ShipmentStatus, *, now_utc: datetime) -> bool:
+    return any(
+        _event_code_from_move(move) in {"LOAD", "DEPA"}
+        and _normalize_event_state(move.event_state) == "actual"
+        and move.transport_mode == "VESSEL"
+        and move.event_occurrence_time is not None
+        and move.event_occurrence_time.tzinfo is not None
+        and move.event_occurrence_time <= now_utc
+        and move.location_code != "AMBIGUOUS"
+        and bool(move.location_code or move.location)
+        and not _move_at_destination(status, move)
+        for move in status.recent_moves
+    )
 
 
 def _move_is_effectively_actual(move: MovementEvent, *, now_utc: datetime) -> bool:
