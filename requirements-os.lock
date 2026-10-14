@@ -92,7 +92,6 @@ libxml2-16=2.15.2+dfsg-0.1ubuntu0.3
 login=1:4.16.0-2+really2.41.3-3ubuntu2.2
 mesa-libgallium=26.0.8-1ubuntu0.3
 mount=2.41.3-3ubuntu2.2
-openssh-client=1:10.2p1-2ubuntu3.6
 openssl=3.5.5-1ubuntu3.7
 openssl-provider-legacy=3.5.5-1ubuntu3.7
 perl=5.40.1-7ubuntu0.3
