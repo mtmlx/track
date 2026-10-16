@@ -38,3 +38,11 @@ destination arrival November 1, 2026 at 16:00 local and final leg
 `MAERSK GLACIER / 643S`. An intermediate arrival at Lazaro Cardenas is not final
 destination arrival. Verify the actual saved ETA/vessel and retained transit
 status after the canary; the document does not itself assert successful repair.
+
+The first ECS preview also exposed an existing Maersk ETD projection issue:
+an inland departure at Tequila after vessel loading at Manzanillo could be
+mistaken for a different-port ocean departure and trigger the origin-barge
+fallback. The targeted Maersk safeguard excludes explicitly truck/road/rail/train
+moves from ETD selection only. Actual inland gate events remain available for
+their own milestone fields, and genuine feeder-barge ETD handling is preserved.
+For this canary, ocean ETD must remain October 8, not the October 7 load date.

@@ -746,7 +746,8 @@ class ClickUpClient:
         )
         if container_update is not None:
             candidate_field_updates.append(container_update)
-        candidate_field_updates.extend(_build_direct_event_field_updates(status=status, settings=self.settings))
+        candidate_field_updates.extend(_build_direct_event_field_updates(
+            status=status, settings=self.settings, shipping_line=shipment.shipping_line))
         effective_field_values = _effective_field_values(
             shipment.current_field_values,
             candidate_field_updates,
@@ -1170,7 +1171,8 @@ def _expected_container_count(custom_fields: Any) -> int | None:
     return None
 
 
-def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Settings) -> list[ShipmentFieldWrite]:
+def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Settings,
+                                      shipping_line: str = "") -> list[ShipmentFieldWrite]:
     updates: list[ShipmentFieldWrite] = []
 
     eta_value = _coerce_display_date(status.eta_local_text, status.eta_time)
@@ -1228,7 +1230,12 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
             ],
         )
     )
-    etd_move = _pick_etd_move(pre_discharge_moves)
+    etd_moves = pre_discharge_moves
+    if carrier_name(shipping_line) == "Maersk":
+        # Inland transport cannot establish ocean ETD or imply an origin barge.
+        etd_moves = [move for move in etd_moves
+                     if (move.transport_mode or "").strip().upper() not in {"TRUCK", "ROAD", "RAIL", "TRAIN"}]
+    etd_move = _pick_etd_move(etd_moves)
     if settings.cf_etd and etd_move is not None:
         etd_value = _coerce_display_date(etd_move.event_time_local_text, etd_move.event_time)
         if etd_value is not None:

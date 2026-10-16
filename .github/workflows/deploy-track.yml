@@ -23,6 +23,8 @@ jobs:
       - run: python -m pytest tests/test_release_orchestration.py -q
       - name: Validate maritime discovery scope and cache invalidation
         run: PYTHONPATH=src python -m pytest tests/test_clickup_carrier_prefilter.py -q
+      - name: Validate Maersk ocean ETD excludes inland transport
+        run: PYTHONPATH=src python -m pytest tests/test_maersk_origin_etd.py tests/test_origin_etd.py -q
       - name: Validate destination arrival and carrier regressions
         run: PYTHONPATH=src python -m pytest tests/test_origin_etd.py tests/test_destination_arrival.py tests/test_maersk_destination_arrival.py tests/test_maersk_adapter.py tests/test_maersk_actual_transit.py tests/test_msc_browser_assisted.py tests/test_msc_adapter.py tests/test_track_trace_mapping.py tests/test_one_adapter.py tests/test_one_empty_return.py tests/test_one_dcsa.py tests/test_tracking_failure_comments.py tests/test_sync_runtime_guards.py -q
   deploy:
