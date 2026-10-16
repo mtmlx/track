@@ -42,6 +42,7 @@ class ShipmentStatus:
     destination_port: str | None = None
     require_destination_evidence: bool = False
     booking_only: bool = False
+    container_booking_map: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

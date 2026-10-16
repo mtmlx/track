@@ -10,6 +10,7 @@ import requests
 from shipment_sync.carriers.common import bounded_response_json, reject_response_redirect, parse_event_time, to_dcsa_movement_name
 from shipment_sync.destination import same_port
 from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
+from shipment_sync.one_split_bookings import container_bookings
 
 
 class BookingLifecycleUnavailable(ValueError):
@@ -62,7 +63,7 @@ class OneDcsaClient:
         self.expires = time.monotonic() + max(0, int(payload.get('expires_in', 0)) - 60)
         return self.token
 
-    def events(self, shipment):
+    def events(self, shipment, *, require_booking_identity=False):
         containers = re.findall(r'\b[A-Z]{4}\d{7}\b', (shipment.container_no or '').upper())
         if len(set(containers)) > 1:
             raise ValueError('ONE DCSA needs a single container per shipment record')
@@ -89,6 +90,8 @@ class OneDcsaClient:
             for event in page:
                 refs = [event.get('equipmentReference')] + [r.get('referenceValue') for r in event.get('references', []) if r.get('referenceType') == 'EQ']
                 bookings = [r.get('documentReferenceValue') for r in event.get('documentReferences', []) if r.get('documentReferenceType') == 'BKG']
+                if require_booking_identity and set(bookings) != {shipment.booking_no}:
+                    raise ValueError('ONE split booking event has missing or conflicting booking identity')
                 if containers and any(ref and ref != containers[0] for ref in refs):
                     raise ValueError('ONE DCSA returned a conflicting container')
                 if shipment.booking_no and bookings and shipment.booking_no.strip() not in bookings:
@@ -118,6 +121,7 @@ class OneDcsaClient:
         return list(unique.values()), containers
 
     def fetch_status(self, shipment: ShipmentRef) -> ShipmentStatus:
+        allocation = container_bookings(shipment)
         references = sorted(set(re.findall(r'\b[A-Z]{4}\d{7}\b', (shipment.container_no or '').upper())))
         discovery = None
         if not references or (shipment.expected_container_count and len(references) < shipment.expected_container_count):
@@ -136,11 +140,24 @@ class OneDcsaClient:
             raise ValueError('ONE DCSA container population does not match the shipment count')
         statuses = []
         for reference in references:
-            scoped = replace(shipment, container_no=reference)
-            events, requested = (discovery, [reference]) if discovery is not None and len(references) == 1 else self.events(scoped)
+            scoped = replace(shipment, container_no=reference,
+                             booking_no=allocation[reference] if allocation else shipment.booking_no)
+            if allocation:
+                events, requested = self.events(scoped, require_booking_identity=True)
+            else:
+                events, requested = (discovery, [reference]) if discovery is not None and len(references) == 1 else self.events(scoped)
             statuses.append(self._map_status(scoped, events, requested))
         status = statuses[0] if len(statuses) == 1 else _aggregate_statuses(shipment, references, statuses)
         status.container_discovery_authoritative = bool(shipment.container_no)
+        if allocation:
+            status.container_booking_map = allocation
+            details = []
+            for reference, item in zip(references, statuses):
+                eta = item.eta_local_text or (item.eta_time.isoformat() if item.eta_time else 'not available')
+                details.append(f'{reference}: booking {allocation[reference]}, '
+                               f'destination vessel {item.final_vessel_voyage or "not established"}, ETA {eta}, '
+                               f'source {item.source_url}')
+            status.movement_details = (status.movement_details or '') + '\nVerified split booking allocation:\n' + '\n'.join(details)
         return status
 
     def _map_booking_status(self, shipment, events):

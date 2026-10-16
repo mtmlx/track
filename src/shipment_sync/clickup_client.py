@@ -811,6 +811,8 @@ class ClickUpClient:
                 comment_lines.append(f"Vessel/Voyage: {vessel_voyage_value}")
             if status.booking_status_text:
                 comment_lines.append(f"Booking status: {status.booking_status_text}")
+            if status.container_booking_map and status.movement_details:
+                comment_lines.append(status.movement_details)
             if recent_moves:
                 comment_lines.append(recent_moves_label)
                 for idx, move in enumerate(recent_moves, start=1):

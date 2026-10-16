@@ -6,6 +6,118 @@ from shipment_sync.clickup_client import ClickUpClient
 from test_track_trace_mapping import _settings
 
 
+def split_shipment():
+    return ShipmentRef('86e2bkqh7', 'MTMLXGT-31624', 'one', 'NB6BI3181300',
+                       'ONEU4454604, ONEU4413040', 'list', expected_container_count=2,
+                       destination_port='PUERTO QUETZAL', current_task_status='Tránsito')
+
+
+def split_events(reference, booking, eta_days=10, vessel='FINAL SHIP'):
+    load = event('load-' + reference, 'LOAD', 'CNNGB')
+    arrival = event('arrival-' + reference, 'ARRI', 'GTPRQ', classifier='EST', days=eta_days)
+    arrival['eventType'] = 'TRANSPORT'
+    arrival['transportEventTypeCode'] = arrival.pop('equipmentEventTypeCode')
+    for row in (load, arrival):
+        row['equipmentReference'] = reference
+        row['documentReferences'][0]['documentReferenceValue'] = booking
+        row['transportCall']['vessel']['vesselName'] = vessel
+    return [load, arrival]
+
+
+def test_reviewed_split_maps_each_container_and_keeps_completion_eta(monkeypatch):
+    pages = [split_events('ONEU4413040', 'NB6BI3181301', 15, 'ONE SERENITY'),
+             split_events('ONEU4454604', 'NB6BI3181300', 10, 'ONE SHINE')]
+    c = client(monkeypatch, [(page, {}) for page in pages])
+    status = c.fetch_status(split_shipment())
+    assert status.eta_time == datetime.fromisoformat(pages[0][1]['eventDateTime'])
+    assert status.discovered_containers == ['ONEU4413040', 'ONEU4454604']
+    assert status.final_vessel_voyage is None  # Do not choose one split leg for both units.
+    assert 'ONEU4413040: booking NB6BI3181301' in status.movement_details
+    assert 'ONEU4454604: booking NB6BI3181300' in status.movement_details
+    assert 'ONE SERENITY' in status.movement_details and 'ONE SHINE' in status.movement_details
+    assert all(move.event_state == 'actual' for move in status.recent_moves if move.name.endswith('(LOAD)'))
+    assert not any(move.name.endswith('(DISC)') for move in status.recent_moves)
+    plan = ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(split_shipment(), status)
+    assert plan.task_status_update is None  # Already in transit, not arrived.
+    assert 'Verified split booking allocation' in plan.comment_text
+    assert not any(update.label == 'Discharge date' for update in plan.custom_field_updates)
+
+
+@pytest.mark.parametrize('change', ['booking', 'containers', 'count', 'destination', 'duplicate', 'carrier'])
+def test_stale_split_mapping_rejected_before_carrier_request(monkeypatch, change):
+    s = split_shipment()
+    if change == 'booking': s.booking_no = 'OTHER'
+    elif change == 'containers': s.container_no = 'ONEU4454604'
+    elif change == 'count': s.expected_container_count = 1
+    elif change == 'destination': s.destination_port = 'PUERTO CORTES'
+    elif change == 'carrier': s.shipping_line = 'msc'
+    else: s.container_no += ', ONEU4454604'
+    c = OneDcsaClient()
+    monkeypatch.setattr(c, '_token', lambda: pytest.fail('stale mapping must not perform lookup'))
+    with pytest.raises(ValueError, match='mapping conflicts'):
+        c.fetch_status(s)
+
+
+@pytest.mark.parametrize('bookings', [[], ['OTHER'], ['NB6BI3181301', 'OTHER']])
+def test_split_requires_unambiguous_positive_booking_evidence(monkeypatch, bookings):
+    rows = split_events('ONEU4413040', 'NB6BI3181301')
+    rows[0]['documentReferences'] = [{'documentReferenceType':'BKG', 'documentReferenceValue':b} for b in bookings]
+    c = client(monkeypatch, [(rows, {})])
+    with pytest.raises(ValueError, match='split booking event'):
+        c.fetch_status(split_shipment())
+
+
+def test_unreviewed_shipment_cannot_borrow_another_tasks_split(monkeypatch):
+    s = split_shipment(); s.task_id = 'another-task'
+    c = client(monkeypatch, [(split_events('ONEU4413040', 'NB6BI3181301'), {})])
+    with pytest.raises(ValueError, match='conflicting booking'):
+        c.fetch_status(s)
+
+
+def test_split_does_not_accept_wrong_container_or_partial_results(monkeypatch):
+    rows = split_events('ONEU2154315', 'NB6BI3181301')
+    with pytest.raises(ValueError, match='conflicting container'):
+        client(monkeypatch, [(rows, {})]).fetch_status(split_shipment())
+    with pytest.raises(ValueError, match='no events'):
+        client(monkeypatch, [([], {})]).fetch_status(split_shipment())
+
+
+def test_split_transshipment_discharge_is_not_shipment_destination_arrival(monkeypatch):
+    second = split_events('ONEU4413040', 'NB6BI3181301', 15)
+    first = split_events('ONEU4454604', 'NB6BI3181300', 10)
+    for rows, port in ((second, 'KRPUS'), (first, 'GTPRQ')):
+        discharge = dict(rows[0], eventID='discharge-' + port, equipmentEventTypeCode='DISC',
+                         eventLocation={'UNLocationCode':port, 'locationName':port})
+        rows.append(discharge)
+    status = client(monkeypatch, [(second, {}), (first, {})]).fetch_status(split_shipment())
+    assert not any(m.name.endswith('(DISC)') for m in status.recent_moves)
+    plan = ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(split_shipment(), status)
+    assert plan.task_status_update is None
+
+
+def test_split_missing_one_eta_does_not_publish_a_partial_eta(monkeypatch):
+    second = split_events('ONEU4413040', 'NB6BI3181301')[:1]
+    first = split_events('ONEU4454604', 'NB6BI3181300')
+    status = client(monkeypatch, [(second, {}), (first, {})]).fetch_status(split_shipment())
+    assert status.eta_time is None
+
+
+def test_split_repeated_preview_retains_allocation_and_is_idempotent(monkeypatch):
+    from dataclasses import replace
+    second = split_events('ONEU4413040', 'NB6BI3181301', 15)
+    first = split_events('ONEU4454604', 'NB6BI3181300', 10)
+    c = client(monkeypatch, [(second, {}), (first, {}), (second, {}), (first, {})])
+    s = split_shipment()
+    writer = ClickUpClient(_settings(clickup_use_task_status=True))
+    plan = writer.plan_shipment_update(s, c.fetch_status(s))
+    saved = {u.field_id:int(u.value.timestamp()*1000) if hasattr(u.value, 'timestamp') else u.value
+             for u in plan.custom_field_updates}
+    fresh = replace(s, current_field_values=saved, track_trace_snapshot_hash=plan.snapshot_hash)
+    again = writer.plan_shipment_update(fresh, c.fetch_status(fresh))
+    assert not again.changed and again.comment_text is None
+    assert again.task_status_update is None
+
+
 def shipment(**kwargs):
     return ShipmentRef('t', 'test', 'one', 'BOOK', 'ONEU2154315', 'l', destination_port='PUERTO QUETZAL', **kwargs)
 
