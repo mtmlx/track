@@ -146,7 +146,7 @@ class Settings:
             clickup_discovery_validate_schema=_bool("CLICKUP_DISCOVERY_VALIDATE_SCHEMA", default=True),
             clickup_discovery_list_name_include=_csv_optional(
                 "CLICKUP_DISCOVERY_LIST_NAME_INCLUDE",
-                default=["shipment"],
+                default=["shipment", "maritimo"],
             ),
             clickup_discovery_list_name_exclude=_csv_optional("CLICKUP_DISCOVERY_LIST_NAME_EXCLUDE"),
             clickup_discovery_cache_path=_optional("CLICKUP_DISCOVERY_CACHE_PATH"),

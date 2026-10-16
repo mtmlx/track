@@ -424,6 +424,8 @@ class ClickUpClient:
             )
             return None
 
+        if payload.get("scope_fingerprint") != self._discovery_scope_fingerprint():
+            return None
         generated_at = payload.get("generated_at")
         lists = payload.get("lists")
         if not isinstance(generated_at, (int, float)) or not isinstance(lists, list):
@@ -441,12 +443,28 @@ class ClickUpClient:
             resolved[lid] = _name_or_none(item.get("name")) or ""
         return resolved
 
+    def _discovery_scope_fingerprint(self) -> str:
+        scope = {
+            "spaces": self.settings.clickup_space_ids,
+            "folders": self.settings.clickup_folder_ids,
+            "team": self.settings.clickup_team_id,
+            "discover_spaces": self.settings.clickup_discover_from_spaces,
+            "discover_team": self.settings.clickup_discover_from_team,
+            "include": self.settings.clickup_discovery_list_name_include,
+            "exclude": self.settings.clickup_discovery_list_name_exclude,
+            "validate_schema": self.settings.clickup_discovery_validate_schema,
+            "required_fields": [self.settings.cf_container_no, self.settings.cf_booking_no,
+                                self.settings.cf_shipping_line, self.settings.cf_status_last_checked],
+        }
+        return hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
+
     def _write_discovery_cache(self, lists: dict[str, str]) -> None:
         path_value = self.settings.clickup_discovery_cache_path
         if not path_value or self.settings.clickup_discovery_cache_ttl_seconds <= 0:
             return
         path = Path(path_value)
         payload = {
+            "scope_fingerprint": self._discovery_scope_fingerprint(),
             "generated_at": time.time(),
             "lists": [{"id": lid, "name": name} for lid, name in sorted(lists.items())],
         }
