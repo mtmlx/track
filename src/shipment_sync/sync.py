@@ -1,5 +1,6 @@
 from .terminal import terminal_safe_text
 import sys
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from shipment_sync.carriers.registry import build_carrier_registry
 from shipment_sync.clickup_client import ClickUpClient
 from shipment_sync.config import Settings
 from shipment_sync.models import ShipmentRef, ShipmentStatus
+from shipment_sync.one_write_holds import write_hold_reason
 
 
 @dataclass
@@ -111,6 +113,14 @@ def _run_sync(
 
     for shipment in all_shipments:
         line_name = shipment.shipping_line
+        hold = write_hold_reason(shipment)
+        if hold:
+            skipped += 1
+            print(terminal_safe_text(json.dumps({'event': 'tracking_write_hold',
+                'task_id': shipment.task_id, 'reason': hold})), file=sys.stderr)
+            if audit is not None:
+                audit.log_task(shipment=shipment, outcome='held_pending_repair', message=hold)
+            continue
         if line_name in excluded_lines:
             prefiltered_excluded_counts[line_name] = prefiltered_excluded_counts.get(line_name, 0) + 1
             if audit is not None:
@@ -245,8 +255,27 @@ def _run_sync(
         failure_phase = 'lookup'
         try:
             status = _fetch_carrier_status(adapter, shipment)
+            if shipment.shipping_line == 'one':
+                # CloudWatch retains successful evidence even when no field changes.
+                evidence = {'event': 'one_tracking_validated', 'task_id': shipment.task_id,
+                    'checked_at': datetime.now(timezone.utc).isoformat(), 'source': status.raw_source,
+                    'booking_only': status.booking_only, 'booking_status': status.booking_status_text,
+                    'containers': status.discovered_containers,
+                    'origin_departure': (status.origin_departure.event_time_local_text
+                                         if status.origin_departure else None),
+                    'origin_departure_state': (status.origin_departure.event_state
+                                               if status.origin_departure else None),
+                    'destination_vessel': status.final_vessel_voyage,
+                    'eta': status.eta_local_text,
+                    'moves': [{'code': m.name, 'port': m.location_code, 'state': m.event_state,
+                               'time': m.event_time_local_text, 'vessel': m.vessel_voyage}
+                              for m in status.recent_moves]}
+                print(terminal_safe_text(json.dumps(evidence)), file=sys.stderr)
             failure_phase = 'writeback'
             write_result = client.update_shipment_status(shipment, status)
+            if shipment.shipping_line == 'one':
+                print(terminal_safe_text(json.dumps({'event': 'one_tracking_writeback', 'task_id': shipment.task_id,
+                                  'outcome': 'updated' if write_result.changed else 'unchanged'})), file=sys.stderr)
             if write_result.changed:
                 updated_items.append(
                     UpdatedShipment(

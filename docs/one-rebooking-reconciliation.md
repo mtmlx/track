@@ -1,0 +1,72 @@
+# ONE forecast reconciliation and departure evidence
+
+## Contract
+
+- An identity-matched ONE forecast can refresh ETD at the first origin port.
+  It cannot populate actual gate/discharge fields or prove transit.
+- A known first-origin load/gate location prevents a later transshipment
+  departure from being substituted when origin departure is missing.
+- An actual departure at the first origin takes precedence over its forecasts.
+  Conflicting forecast departures at that origin hold the update for review.
+- A confirmed booking without assigned containers can carry an origin forecast
+  and destination vessel, but never physical milestones. Pending, cancelled,
+  rejected and unknown booking lifecycles cannot publish these forecasts.
+- A destination import voyage alone is not the documented sailing voyage.
+  A unique matching export-voyage forecast can resolve it; actual export
+  evidence retains precedence. Existing vessel/rotation conflict guards remain.
+- ONE truck/rail departures cannot establish ocean ETD or transit. Estimated
+  events cannot establish transit. Existing actual-event and barge guards remain.
+- Routine tracking never rolls a human/native-automation status backward.
+  Historical incorrect statuses require separately approved repair.
+- ONE completion timestamps are written after successful fields, status and
+  comment writes. A partial write is not recorded as a completed check.
+
+## Evidence and external automations
+
+CloudWatch receives `one_tracking_validated` before writeback, with source,
+booking-only flag, discovered containers, origin schedule classifier,
+destination vessel, ETA and normalized movement evidence. The separate
+`one_tracking_writeback` event identifies updated/unchanged completion. A
+validation event alone does not prove successful writeback.
+
+Native ClickUp automations are outside this repository. An automation that
+moves a shipment to transit or sends a departure notice from ETD alone remains
+unsafe: ETD is a forecast. Require a dedicated actual-departure validation
+signal (or reviewed actual movement evidence), tied to the current booking,
+before both the transition and customer notice. Do not treat booking
+confirmation, the clock reaching ETD, or Last T&T Update as that signal.
+No native ClickUp automation was modified by this release.
+
+## Reviewed hold: MTMLXGT-33793 / 86e3etkkm
+
+`allocations/one_write_holds.json` protects this exact task pending repair
+approval. Scheduled runs skip it before preflight and notices. The writeback
+entry point also refuses all writes, including comments and timestamps.
+Read-only planning remains available. Do not remove the hold until an approved
+repair has been applied and read back; then release it in a reviewed commit.
+
+Evidence available on October 18, 2026:
+
+- CNS confirmation in task comments: booking SH6AAN844400, RDO ACE 2642E,
+  ETD October 26, cutoff October 22. Comment 90170260895096 flags the conflict.
+- Saved task: ONE SERENITY 2639E, ETD October 18, native transit status.
+- Current carrier evidence: TRHU4409892, RDO ACE 2642E, Shanghai departure
+  October 21 ESTIMATE, destination arrival November 25 ESTIMATE. No actual
+  loading/departure. These dates conflict with CNS; do not silently call either
+  departure date confirmed or actual.
+- ClickUp status history: transit at 2026-10-18T10:00:07.607Z; ClickBot notice
+  comment 90170263795783 at 10:00:10.249Z. This precedes the later T&T check.
+
+Repair preview must refresh the task and carrier evidence after deployment,
+display exact before/after values, identify any forecast/date conflict, propose
+only supported fields and the evidence-supported operational status, and leave
+booking, ETA, cutoff and unrelated fields unchanged unless explicitly justified.
+No guessed destination dates or broad resets. Approval is required before any
+repair, then verify saved fields and a repeated read-only plan for recurrence.
+
+## Regression coverage
+
+`tests/test_one_rebooking.py` covers forecast ETD/local dates, first-origin
+selection, confirmed containerless bookings, unconfirmed safeguards, forecast
+vessel/export direction, actual/inland departures, ambiguous schedules,
+idempotence, completion-write ordering, and the protected repair task.

@@ -244,7 +244,8 @@ def test_task_status_write_failure_notifies_without_claiming_complete_success(mo
     monkeypatch.setattr(client, 'plan_shipment_update', lambda *args: plan)
     def fail(*args): raise requests.Timeout('status update uncertain')
     monkeypatch.setattr(client, '_set_task_status', fail)
-    client.update_shipment_status(shipment(), ShipmentStatus('transito'))
+    with pytest.raises(requests.Timeout, match='status update uncertain'):
+        client.update_shipment_status(shipment(), ShipmentStatus('transito'))
     assert len(posts) == 1
     assert 'Write outcome is uncertain' in posts[0]['comment'][0]['text']
 

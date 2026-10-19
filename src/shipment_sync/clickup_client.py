@@ -27,6 +27,7 @@ from .models import (
     ShipmentWriteResult,
 )
 from .tracking_failures import carrier_name, classify_failure, failure_comment
+from .one_write_holds import write_hold_reason
 
 
 class ClickUpWorkloadLimitError(RuntimeError):
@@ -880,6 +881,17 @@ class ClickUpClient:
             current_label = shipment.current_task_status or "unknown"
             comment_lines.append(f"Task status: {current_label} -> {task_status_update}")
 
+        if status.raw_source == 'https://apix.one-line.com/v2/events':
+            if status.origin_departure is not None:
+                departure = status.origin_departure
+                comment_lines.append('Origin departure: '
+                    + _format_port_local_time(departure.event_time_local_text, departure.event_time)
+                    + ' | ' + str(departure.location_code) + ' | ' + str(departure.event_state).upper())
+            if not _one_has_actual_departure(status, now_utc):
+                comment_lines.append('Departure NOT validated: no actual carrier departure was returned. '
+                    'Forecast ETD and booking confirmation do not authorize a departure notice. '
+                    'If the task is already in transit, the assignee must review its status before customer communication.')
+
         if not fields_changed and task_status_update and not self.settings.shipment_comment_on_no_change:
             comment_text = "\n".join(
                 [
@@ -911,6 +923,9 @@ class ClickUpClient:
         )
 
     def update_shipment_status(self, shipment: ShipmentRef, status: ShipmentStatus) -> ShipmentWriteResult:
+        hold = write_hold_reason(shipment)
+        if hold:
+            raise ValueError(hold)
         try:
             plan = self.plan_shipment_update(shipment, status)
         except Exception as exc:
@@ -918,7 +933,12 @@ class ClickUpClient:
             exc.shipment_sync_phase = 'projection'
             raise
 
+        is_one = carrier_name(shipment.shipping_line) == 'ONE'
+        completion_updates = [update for update in plan.custom_field_updates
+                              if is_one and update.field_id == self.settings.cf_status_last_checked]
         for update in plan.custom_field_updates:
+            if update in completion_updates:
+                continue
             if update.field_type == "datetime":
                 self._set_date_custom_field(shipment.task_id, update.field_id, update.value, include_time=True)
             elif update.field_type == "date":
@@ -938,9 +958,13 @@ class ClickUpClient:
                     self.report_tracking_failure(shipment, error='ClickUp task status update failed', phase='writeback')
                 except Exception as notice_exc:
                     print(f'T&T failure comment not verified for task {shipment.task_id}: {type(notice_exc).__name__}', file=sys.stderr)
+                if is_one:
+                    raise
 
         if plan.comment_text:
             self._post_comment(shipment.task_id, plan.comment_text)
+        for update in completion_updates:
+            self._set_date_custom_field(shipment.task_id, update.field_id, update.value, include_time=True)
         return ShipmentWriteResult(
             changed=plan.changed,
             status_value=plan.status_value,
@@ -1188,7 +1212,12 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
 
     ordered_moves = _order_moves_ascending(status.recent_moves)
     if status.raw_source == "https://apix.one-line.com/v2/events":
-        # DCSA forecasts belong in ETA/timeline, never actual gate/ETD fields.
+        # ETD is a forecast; physical gates and workflow milestones remain actual-only.
+        departure = status.origin_departure
+        if settings.cf_etd and departure is not None:
+            value = _coerce_display_date(departure.event_time_local_text, departure.event_time)
+            if value is not None:
+                updates.append(ShipmentFieldWrite(settings.cf_etd, value, 'date', 'ETD'))
         now_utc = datetime.now(timezone.utc)
         ordered_moves = [m for m in ordered_moves if _move_is_effectively_actual(m, now_utc=now_utc)]
     if not ordered_moves:
@@ -1231,12 +1260,13 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
         )
     )
     etd_moves = pre_discharge_moves
-    if carrier_name(shipping_line) == "Maersk":
+    if carrier_name(shipping_line) in {"Maersk", "ONE"}:
         # Inland transport cannot establish ocean ETD or imply an origin barge.
         etd_moves = [move for move in etd_moves
                      if (move.transport_mode or "").strip().upper() not in {"TRUCK", "ROAD", "RAIL", "TRAIN"}]
     etd_move = _pick_etd_move(etd_moves)
-    if settings.cf_etd and etd_move is not None:
+    if (settings.cf_etd and etd_move is not None
+            and not (status.raw_source == 'https://apix.one-line.com/v2/events' and status.origin_departure is not None)):
         etd_value = _coerce_display_date(etd_move.event_time_local_text, etd_move.event_time)
         if etd_value is not None:
             updates.append(
@@ -1510,6 +1540,9 @@ def _derive_operational_status_step(
         actual_origin_codes = {
             _event_code_from_move(move) for move in status.recent_moves
             if _move_is_effectively_actual(move, now_utc=now_utc)
+            and (_event_code_from_move(move) != 'DEPA' or (
+                move.location_code and not _move_at_destination(status, move)
+                and (move.transport_mode or '').strip().upper() not in {'TRUCK', 'ROAD', 'RAIL', 'TRAIN'}))
             and (_event_code_from_move(move) not in {"GTIN", "GTOT"}
                 or (not _move_at_destination(status, move)
                     and move.equipment_load_state == {"GTIN": "LADEN", "GTOT": "EMPTY"}[_event_code_from_move(move)]))
@@ -1609,6 +1642,16 @@ def _derive_operational_status_step(
         target_step = _max_workflow_step(target_step, "empty_returned")
 
     return target_step
+
+
+def _one_has_actual_departure(status: ShipmentStatus, now_utc: datetime) -> bool:
+    return (not status.booking_only and any(
+        _event_code_from_move(move) == 'DEPA'
+        and _move_is_effectively_actual(move, now_utc=now_utc)
+        and move.location_code
+        and not _move_at_destination(status, move)
+        and (move.transport_mode or '').strip().upper() not in {'TRUCK', 'ROAD', 'RAIL', 'TRAIN'}
+        for move in status.recent_moves))
 
 
 def _effective_field_values(
@@ -2721,5 +2764,10 @@ def _compute_snapshot_hash(
             latest_move.event_time if latest_move else None,
         ),
     }
+    if status.raw_source == 'https://apix.one-line.com/v2/events':
+        snapshot['origin_departure'] = (status.origin_departure.event_time_local_text
+                                        if status.origin_departure else None)
+        snapshot['origin_departure_state'] = (status.origin_departure.event_state
+                                              if status.origin_departure else None)
     raw = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

@@ -183,6 +183,26 @@ class OneDcsaClient:
             arrivals.append((date, event))
         arrival = max(arrivals, default=None, key=lambda item: item[0])
         confirmed = booking_status == 'Confirmed'
+        schedule_moves = []
+        if confirmed:
+            for event in events:
+                if event.get('eventType') != 'TRANSPORT' or event.get('transportEventTypeCode') != 'DEPA':
+                    continue
+                # Booking-wide schedules need positive identity, not just an absent conflict.
+                bookings = {r.get('documentReferenceValue') for r in event.get('documentReferences', [])
+                            if r.get('documentReferenceType') == 'BKG'}
+                if bookings != {shipment.booking_no}:
+                    continue
+                if event.get('eventClassifierCode') not in ('EST', 'PLN'):
+                    continue
+                call = event.get('transportCall') or {}
+                location = event.get('eventLocation') or {}
+                schedule_moves.append(MovementEvent(
+                    name='Transport Departed (DEPA)', event_time=_booking_event_time(event),
+                    event_time_local_text=event['eventDateTime'], event_state='estimated',
+                    location_code=location.get('UNLocationCode') or call.get('UNLocationCode'),
+                    transport_mode=call.get('modeOfTransport'),
+                    vessel_voyage=(call.get('vessel') or {}).get('vesselName')))
         return ShipmentStatus(
             status_text=booking_status, booking_status_text=booking_status,
             booking_only=True, raw_source=self.base + '/v2/events',
@@ -190,6 +210,8 @@ class OneDcsaClient:
                         + shipment.booking_no.strip() + '&trakNoTpCdParam=B'),
             eta_time=arrival[0] if confirmed and arrival else None,
             eta_local_text=arrival[1]['eventDateTime'] if confirmed and arrival else None,
+            origin_departure=_origin_departure(schedule_moves, shipment.destination_port),
+            final_vessel_voyage=_destination_sailing_voyage(arrival[1], events) if confirmed and arrival else None,
             destination_port=shipment.destination_port, require_destination_evidence=True,
             movement_details='Booking lifecycle only; containers are not yet assigned. No physical milestone inferred.')
 
@@ -234,6 +256,7 @@ class OneDcsaClient:
             moves.append(MovementEvent(name=name, location=location, event_time=dt,
                 event_time_local_text=raw_time, event_state='actual' if classifier == 'ACT' else 'estimated',
                 vessel_voyage=vv, source_event_name=source_name, location_code=code,
+                transport_mode=tc.get('modeOfTransport'),
                 equipment_load_state=e.get('emptyIndicatorCode') if e.get('eventType') == 'EQUIPMENT' else None))
             if event_code == 'ARRI' and same_port(shipment.destination_port, code or location):
                 arrivals.append((classifier == 'ACT', dt, raw_time, e))
@@ -250,6 +273,7 @@ class OneDcsaClient:
             source_url=('https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam=' + discovered[0] + '&trakNoTpCdParam=C') if discovered else None,
             vessel_voyage=final_vessel,
             final_vessel_voyage=final_vessel,
+            origin_departure=_origin_departure(moves, shipment.destination_port),
             destination_port=shipment.destination_port, require_destination_evidence=True)
 
 
@@ -301,8 +325,10 @@ def _destination_sailing_voyage(arrival, events):
     inbound = str(call.get('importVoyageNumber') or '').strip()
     arrival_time = parse_event_time(arrival['eventDateTime'])
     candidates = []
+    forecasts = set()
     for event in events:
-        if event.get('eventClassifierCode') != 'ACT':
+        classifier = event.get('eventClassifierCode')
+        if classifier not in ('ACT', 'EST', 'PLN'):
             continue
         code = event.get('equipmentEventTypeCode') or event.get('transportEventTypeCode')
         if code not in ('LOAD', 'DEPA'):
@@ -321,13 +347,21 @@ def _destination_sailing_voyage(arrival, events):
         reference = export or inbound
         if reference and _voyage_number(voyage) != _voyage_number(reference):
             continue
-        candidates.append((when, voyage))
+        if classifier == 'ACT':
+            candidates.append((when, voyage))
+        else:
+            forecasts.add(voyage)
     if candidates:
         latest = max(when for when, _ in candidates)
         voyages = {voyage for when, voyage in candidates if when == latest}
         if len(voyages) != 1:
             return None
         export = next(iter(voyages))
+    elif not export and forecasts:
+        # A unique export schedule may supply a forecast vessel, never actual transit.
+        if len(forecasts) != 1:
+            return None
+        export = next(iter(forecasts))
     # An arrival import voyage is not the sailing voyage printed on documents.
     return f'{name} {export}' if export else None
 
@@ -339,6 +373,32 @@ def _voyage_number(voyage):
 
 def _discovered_containers(events):
     return sorted({ref for e in events for ref in ([e.get('equipmentReference')] + [r.get('referenceValue') for r in e.get('references', []) if r.get('referenceType') == 'EQ']) if ref and re.fullmatch(r'[A-Z]{4}\d{7}', ref)})
+
+
+def _origin_departure(moves, destination):
+    departures = [m for m in moves if m.name.endswith('(DEPA)') and m.event_time is not None
+                  and m.location_code and not same_port(destination, m.location_code)
+                  and (m.transport_mode or '').upper() not in {'TRUCK', 'ROAD', 'RAIL', 'TRAIN'}]
+    if not departures:
+        return None
+    first = min(departures, key=lambda m: m.event_time)
+    anchors = [m for m in moves if m.event_time is not None and m.location_code
+               and not same_port(destination, m.location_code)
+               and (m.name.endswith('(LOAD)')
+                    or (m.name.endswith('(GTOT)') and m.equipment_load_state == 'EMPTY')
+                    or (m.name.endswith('(GTIN)') and m.equipment_load_state == 'LADEN'))]
+    if anchors:
+        first = min(anchors, key=lambda m: m.event_time)
+    origin = [m for m in departures if first.location_code == m.location_code
+              or same_port(first.location_code, m.location_code)]
+    if not origin:
+        return None
+    actual = [m for m in origin if m.event_state == 'actual']
+    if actual:
+        return min(actual, key=lambda m: m.event_time)
+    if len({(m.event_time, m.vessel_voyage) for m in origin}) != 1:
+        raise ValueError('ONE booking has conflicting origin departure schedules; confirm the rebooking before updating')
+    return origin[0]
 
 
 def _aggregate_statuses(shipment, references, statuses):
@@ -375,6 +435,12 @@ def _aggregate_statuses(shipment, references, statuses):
     eta_status = max(statuses, key=lambda status: status.eta_time) if all(status.eta_time for status in statuses) else None
     vessels = {status.final_vessel_voyage for status in statuses}
     final_vessel = next(iter(vessels)) if len(vessels) == 1 else None
+    departures = [status.origin_departure for status in statuses]
+    origin_departure = None
+    if all(departures) and len({m.location_code for m in departures}) == 1:
+        origin_departure = max(departures, key=lambda m: m.event_time)
+        if any(m.event_state != 'actual' for m in departures):
+            origin_departure = replace(origin_departure, event_state='estimated')
     return ShipmentStatus(status_text=latest.name if latest else 'Awaiting actual ONE event for every container',
         location=latest.location if latest else None, event_time=latest.event_time if latest else None,
         eta_time=eta_status.eta_time if eta_status else None,
@@ -383,5 +449,6 @@ def _aggregate_statuses(shipment, references, statuses):
         container_discovery_authoritative=bool(shipment.container_no), raw_source='https://apix.one-line.com/v2/events',
         source_url=statuses[0].source_url, vessel_voyage=final_vessel,
         final_vessel_voyage=final_vessel, destination_port=shipment.destination_port,
+        origin_departure=origin_departure,
         require_destination_evidence=True,
         movement_details=f'Shipment milestones require matching evidence across all {len(references)} containers.')
