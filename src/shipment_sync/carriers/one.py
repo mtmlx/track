@@ -152,12 +152,15 @@ class OneAdapter(CarrierAdapter):
             raise ValueError("ONE booking lookup has ambiguous confirmation evidence")
         booking_status = statuses.pop()
         confirmed = booking_status.strip().lower() in {"confirmed", "booking confirmed"}
-        arrivals = []
+        arrivals, departures = [], []
         if confirmed:
             for row in rows:
                 if not same_port(shipment.destination_port, (row.get("pod") or {}).get("code")):
                     continue
                 for event in row.get("cargoEvents") or []:
+                    departure = _booking_origin_forecast(row, event)
+                    if departure is not None:
+                        departures.append(departure)
                     if (event.get("matrixId") == "E089" and event.get("trigger") == "ESTIMATED"
                             and same_port(shipment.destination_port, event.get("locationName"))):
                         date = parse_event_time(event.get("date"))
@@ -165,13 +168,17 @@ class OneAdapter(CarrierAdapter):
                             arrivals.append((date, event.get("localPortDate") or event["date"]))
         if len({date for date, _ in arrivals}) > 1:
             raise ValueError("ONE booking lookup has conflicting destination schedules")
+        if len({(move.location_code, move.event_time, move.event_time_local_text) for move in departures}) > 1:
+            raise ValueError("ONE booking lookup has conflicting origin departure schedules")
         arrival = arrivals[0] if arrivals else None
         return ShipmentStatus(
             status_text=booking_status, booking_status_text=booking_status, booking_only=True,
             eta_time=arrival[0] if arrival else None, eta_local_text=arrival[1] if arrival else None,
+            origin_departure=departures[0] if departures else None,
             raw_source=url, source_url=_build_one_tracking_url(shipment.booking_no, "B", "C"),
             destination_port=shipment.destination_port, require_destination_evidence=True,
-            movement_details="Explicit booking lifecycle; containers not assigned. No physical milestones inferred.")
+            movement_details="Explicit booking lifecycle; containers not assigned. Origin schedule is forecast only. "
+                             "No physical milestones inferred; booking header is not destination-vessel evidence.")
 
     def _fetch_status_from_edh(
         self,
@@ -437,6 +444,34 @@ class OneAdapter(CarrierAdapter):
         )
         payload = extract_json_from_http_response(response)
         return payload, f"one-api:{self.api_url}"
+
+
+def _booking_origin_forecast(row: dict[str, Any], event: dict[str, Any]) -> MovementEvent | None:
+    if event.get("matrixId") != "E061" or event.get("trigger") != "ESTIMATED":
+        return None
+    origin = row.get("por") or {}
+    port = origin.get("code")
+    name = event.get("locationName")
+    if (not isinstance(port, str) or not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}", port)
+            or port == (row.get("pod") or {}).get("code") or not isinstance(name, str)
+            or not name.strip() or name.strip().upper() not in {
+                port, str(origin.get("locationName") or "").strip().upper()}):
+        return None
+    raw = event.get("date")
+    if not raw:
+        return None
+    # ONE's localPortDate is a wall-clock rendering (sometimes suffixed Z),
+    # not the UTC instant. Preserve both; never derive the origin date in MX.
+    date = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if date.tzinfo is None:
+        raise ValueError("ONE booking origin departure lacks an explicit timezone")
+    local = event.get("localPortDate") or raw
+    local_date = datetime.fromisoformat(local.replace("Z", "+00:00"))
+    if local_date.tzinfo is None:
+        raise ValueError("ONE booking origin local departure lacks an explicit timezone")
+    return MovementEvent(
+        name="Transport Departed (DEPA)", location=name, location_code=port,
+        event_time=date, event_time_local_text=local, event_state="estimated", transport_mode="VESSEL")
 
 
 def _extract_one_event_vessel_voyage(event: dict[str, Any]) -> str | None:

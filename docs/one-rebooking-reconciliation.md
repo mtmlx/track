@@ -94,3 +94,18 @@ idempotence, completion-write ordering, and the protected repair task.
   is not a carrier failure; owners must supply confirmed references when issued.
 - Regression tests: `tests/test_one_inventory_recovery.py`. Native ClickUp
   departure automations remain outside this release, and 33793 stays held.
+
+## Confirmed booking-only EDH forecasts
+
+The EDH fallback maps E061 estimated departure only after exact booking identity,
+complete population, explicit confirmation and matching shipment POD checks.
+Departure location must exactly match the carrier POR name/code; do not infer
+port aliases from geography or country fields. Preserve the UTC instant and
+ONE's port-local wall-clock rendering separately. Conflicting origin schedules
+and timezone-less departure dates fail closed.
+
+This forecast is not added to physical movement history. Booking-wide actual
+events cannot establish pickup, loading, transit, discharge or return without
+container evidence. The booking header's vessel/voyage is not proof of a final
+destination leg, so it never overwrites a verified shipment vessel. Existing
+ETA behavior and the 33793 write hold remain unchanged.

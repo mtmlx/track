@@ -1211,13 +1211,17 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
         )
 
     ordered_moves = _order_moves_ascending(status.recent_moves)
-    if status.raw_source == "https://apix.one-line.com/v2/events":
+    one_origin_forecast = status.raw_source == "https://apix.one-line.com/v2/events" or (
+        carrier_name(shipping_line) == "ONE" and status.booking_only
+        and status.raw_source == "https://ecomm.one-line.com/api/v1/edh/containers/track-and-trace/search")
+    if one_origin_forecast:
         # ETD is a forecast; physical gates and workflow milestones remain actual-only.
         departure = status.origin_departure
         if settings.cf_etd and departure is not None:
             value = _coerce_display_date(departure.event_time_local_text, departure.event_time)
             if value is not None:
                 updates.append(ShipmentFieldWrite(settings.cf_etd, value, 'date', 'ETD'))
+    if status.raw_source == "https://apix.one-line.com/v2/events":
         now_utc = datetime.now(timezone.utc)
         ordered_moves = [m for m in ordered_moves if _move_is_effectively_actual(m, now_utc=now_utc)]
     if not ordered_moves:
@@ -1266,7 +1270,7 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
                      if (move.transport_mode or "").strip().upper() not in {"TRUCK", "ROAD", "RAIL", "TRAIN"}]
     etd_move = _pick_etd_move(etd_moves)
     if (settings.cf_etd and etd_move is not None
-            and not (status.raw_source == 'https://apix.one-line.com/v2/events' and status.origin_departure is not None)):
+            and not (one_origin_forecast and status.origin_departure is not None)):
         etd_value = _coerce_display_date(etd_move.event_time_local_text, etd_move.event_time)
         if etd_value is not None:
             updates.append(
