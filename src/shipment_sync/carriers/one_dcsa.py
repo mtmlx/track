@@ -385,8 +385,9 @@ def _origin_departure(moves, destination):
     anchors = [m for m in moves if m.event_time is not None and m.location_code
                and not same_port(destination, m.location_code)
                and (m.name.endswith('(LOAD)')
-                    or (m.name.endswith('(GTOT)') and m.equipment_load_state == 'EMPTY')
                     or (m.name.endswith('(GTIN)') and m.equipment_load_state == 'LADEN'))]
+    # Empty pickup may be at an inland depot or another port. Only laden
+    # terminal/load evidence can bind the first sailing port, including barges.
     if anchors:
         first = min(anchors, key=lambda m: m.event_time)
     origin = [m for m in departures if first.location_code == m.location_code

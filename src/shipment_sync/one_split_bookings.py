@@ -17,11 +17,15 @@ def container_bookings(shipment):
     if entry is None:
         return None
     allocation = entry.get('container_bookings')
+    raw_bookings = (shipment.booking_no or '').strip().upper()
+    bookings = re.split(r'[\s,;]+', raw_bookings) if re.fullmatch(r'[A-Z0-9]+(?:[\s,;]+[A-Z0-9]+)*', raw_bookings) else []
+    allowed_booking_sets = ({entry.get('parent_booking')}, set(allocation.values())) if isinstance(allocation, dict) else ()
     references = re.findall(r'\b[A-Z]{4}\d{7}\b', (shipment.container_no or '').upper())
     if (not isinstance(allocation, dict) or not allocation
             or not entry.get('evidence')
             or shipment.shipping_line.strip().lower() != 'one'
-            or shipment.booking_no != entry.get('parent_booking')
+            or not bookings or len(bookings) != len(set(bookings))
+            or set(bookings) not in allowed_booking_sets
             or not same_port(shipment.destination_port, entry.get('destination_port'))
             or len(references) != len(set(references))
             or set(references) != set(allocation)

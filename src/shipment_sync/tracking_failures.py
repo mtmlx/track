@@ -35,6 +35,8 @@ def source_url(shipment: ShipmentRef) -> str | None:
     carrier = carrier_name(shipment.shipping_line)
     if carrier == 'ONE':
         reference = shipment.booking_no or shipment.container_no or ''
+        if not reference:
+            return 'https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking'
         return ('https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam='
                 + quote(reference, safe='') + ('&trakNoTpCdParam=B' if shipment.booking_no else '&trakNoTpCdParam=C'))
     return {
@@ -52,6 +54,13 @@ def source_url(shipment: ShipmentRef) -> str | None:
 
 def classify_failure(shipment: ShipmentRef, error: str, *, phase: str = 'lookup') -> FailureNotice:
     message = error.lower()
+    if phase == 'references':
+        return FailureNotice('missing_references',
+            'Both Booking number and Container(s) number(s) are blank, so tracking has no shipment reference to query.',
+            'No carrier lookup or tracking field/status update was attempted. Last T&T Update is not refreshed; dates and customer notices must not be treated as newly validated.',
+            ('If the booking has been issued, enter its confirmed carrier booking reference and attach the confirmation here. A supported confirmed booking can be checked before containers are assigned.',
+             'Enter assigned container numbers only when confirmed by carrier evidence. Do not invent a reference or force a status to start tracking.',
+             'If booking is still pending, keep the task pending and reply here with the booking owner and expected confirmation date. Correcting the reference will make the task eligible for the next tracking run.'))
     if phase == 'partial_browser_batch':
         failed = classify_failure(shipment, error)
         return FailureNotice('partial_browser_batch_' + failed.category,
