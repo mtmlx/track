@@ -89,6 +89,13 @@ def classify_failure(shipment: ShipmentRef, error: str, *, phase: str = 'lookup'
             'A transshipment discharge cannot be treated as arrival at the final destination without matching port evidence.',
             ('Verify the task POD against the carrier booking/bill of lading and record the authoritative destination port/code.',
              'Provide the full event history and locations to integration support. Correct only evidence-supported destination references; do not guess an arrival or discharge date.'))
+    if 'conflicting origin departure schedules' in message:
+        return FailureNotice('booking_schedule_conflict',
+            'ONE returned conflicting departure dates or sailings for the same origin port.',
+            'We cannot choose a reliable ETD or reconcile the rebooking. Using the old date or guessing a replacement could trigger an incorrect status or customer departure notice.',
+            ('Ask the carrier/booking party to confirm the current booking, first-origin departure date, vessel/export voyage and cutoff together; attach that confirmation here.',
+             'Ask integration support to reconcile the conflicting carrier schedules before rerunning. Do not change container identities or force transit to bypass this hold.',
+             'Do not send a departure notice from forecast ETD alone; actual qualifying carrier movement evidence is required.'))
     if any(s in message for s in ('conflict', 'identity mismatch', 'journey mismatch', 'unexpected container',
                                   'does not include', 'lacks matching booking', 'does not contain that container')):
         return FailureNotice('identity_conflict',
