@@ -382,12 +382,24 @@ def _origin_departure(moves, destination):
     if not departures:
         return None
     first = min(departures, key=lambda m: m.event_time)
+    loads = [m for m in moves if m.name.endswith('(LOAD)') and m.event_time is not None and m.location_code
+             and not same_port(destination, m.location_code)
+             and (m.transport_mode or '').upper() not in {'TRUCK', 'ROAD', 'RAIL', 'TRAIN'}]
+    first_load = min(loads, key=lambda m: m.event_time) if loads else None
     anchors = [m for m in moves if m.event_time is not None and m.location_code
                and not same_port(destination, m.location_code)
-               and (m.name.endswith('(LOAD)')
-                    or (m.name.endswith('(GTIN)') and m.equipment_load_state == 'LADEN'))]
+               and m.name.endswith('(GTIN)') and m.equipment_load_state == 'LADEN'
+               and (first_load is None or m.event_state == 'actual')
+               and not any(out.name.endswith('(GTOT)') and out.event_time is not None
+                           and (m.location_code == out.location_code
+                                or same_port(m.location_code, out.location_code))
+                           and m.event_time <= out.event_time
+                           and (first_load is None or out.event_time <= first_load.event_time)
+                           for out in moves)] + loads
     # Empty pickup may be at an inland depot or another port. Only laden
     # terminal/load evidence can bind the first sailing port, including barges.
+    # A later gate-out invalidates a depot gate-in. Forecast gate-ins cannot
+    # displace explicit loading evidence when the carrier schedule is unordered.
     if anchors:
         first = min(anchors, key=lambda m: m.event_time)
     origin = [m for m in departures if first.location_code == m.location_code

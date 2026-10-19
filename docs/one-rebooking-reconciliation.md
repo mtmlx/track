@@ -78,6 +78,9 @@ idempotence, completion-write ordering, and the protected repair task.
   departure. Preserve the feeder/barge anchor when its own departure is missing:
   never substitute a later mother-vessel departure. No new port aliases are
   inferred from depot geography. Forecasts remain non-physical evidence.
+  A gate-out before first loading invalidates the same depot's earlier gate-in.
+  When explicit loading exists, forecast gate-ins cannot displace that origin;
+  actual feeder gate-in evidence still prevents borrowing a mother departure.
 - The reviewed 31624 mapping accepts the parent booking alone or the exact full
   reviewed booking set (comma/semicolon/whitespace separated). Duplicate,
   unknown, child-only and partial combinations are rejected. The saved booking

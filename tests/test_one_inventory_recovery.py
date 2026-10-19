@@ -40,6 +40,46 @@ def test_missing_feeder_departure_never_borrows_mother_vessel_departure():
     assert _origin_departure(moves,'GTPRQ') is None
 
 
+@pytest.mark.parametrize('depot,port', [('TWKHH','TWKEL'), ('TWKEL','TWKHH')])
+def test_depot_gate_in_then_gate_out_does_not_bind_sailing_origin(depot, port):
+    now = datetime.now(timezone.utc)
+    moves = [MovementEvent('Container Gated In (GTIN)', event_time=now-timedelta(days=4),
+                           location_code=depot, equipment_load_state='LADEN', event_state='actual'),
+             MovementEvent('Container Gated Out (GTOT)', event_time=now-timedelta(days=3),
+                           location_code=depot, equipment_load_state='EMPTY', event_state='actual'),
+             MovementEvent('Container Gated In (GTIN)', event_time=now-timedelta(days=2),
+                           location_code=port, equipment_load_state='LADEN', event_state='actual'),
+             MovementEvent('Container Loaded (LOAD)', event_time=now-timedelta(days=1),
+                           location_code=port, event_state='actual'),
+             MovementEvent('Transport Departed (DEPA)', event_time=now,
+                           location_code=port, event_state='actual')]
+    assert _origin_departure(moves, 'GTPRQ') is moves[-1]
+
+
+def test_out_of_order_forecast_gate_in_never_replaces_first_loaded_port():
+    now = datetime.now(timezone.utc)
+    moves = [MovementEvent('Container Gated In (GTIN)', event_time=now,
+                           location_code='KRPUS', equipment_load_state='LADEN', event_state='estimated'),
+             MovementEvent('Container Loaded (LOAD)', event_time=now+timedelta(days=3),
+                           location_code='CNTXG', event_state='estimated'),
+             MovementEvent('Transport Departed (DEPA)', event_time=now+timedelta(days=3,hours=1),
+                           location_code='CNTXG', event_state='estimated'),
+             MovementEvent('Transport Departed (DEPA)', event_time=now+timedelta(days=8),
+                           location_code='KRPUS', event_state='estimated')]
+    assert _origin_departure(moves, 'GTPRQ') is moves[2]
+
+
+def test_actual_feeder_gate_in_without_departure_still_blocks_mother_departure():
+    now = datetime.now(timezone.utc)
+    moves = [MovementEvent('Container Gated In (GTIN)', event_time=now,
+                           location_code='FEEDER', equipment_load_state='LADEN', event_state='actual'),
+             MovementEvent('Container Loaded (LOAD)', event_time=now+timedelta(days=3),
+                           location_code='CNSHA', event_state='estimated'),
+             MovementEvent('Transport Departed (DEPA)', event_time=now+timedelta(days=4),
+                           location_code='CNSHA', event_state='estimated')]
+    assert _origin_departure(moves, 'GTPRQ') is None
+
+
 @pytest.mark.parametrize('bookings', ['NB6BI3181300', 'NB6BI3181300, NB6BI3181301',
                                     'NB6BI3181301; NB6BI3181300', 'nb6bi3181301\nNB6BI3181300'])
 def test_exact_reviewed_split_reference_set_is_accepted_without_rewriting(monkeypatch, bookings):
