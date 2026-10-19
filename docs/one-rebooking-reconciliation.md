@@ -70,3 +70,24 @@ repair, then verify saved fields and a repeated read-only plan for recurrence.
 selection, confirmed containerless bookings, unconfirmed safeguards, forecast
 vessel/export direction, actual/inland departures, ambiguous schedules,
 idempotence, completion-write ordering, and the protected repair task.
+
+## Inventory recovery: depot, split references and missing references
+
+- Empty-pickup GTOT is not an ocean-origin anchor. Bind departure to the first
+  laden gate-in/load location; absent those anchors, use the first eligible
+  departure. Preserve the feeder/barge anchor when its own departure is missing:
+  never substitute a later mother-vessel departure. No new port aliases are
+  inferred from depot geography. Forecasts remain non-physical evidence.
+- The reviewed 31624 mapping accepts the parent booking alone or the exact full
+  reviewed booking set (comma/semicolon/whitespace separated). Duplicate,
+  unknown, child-only and partial combinations are rejected. The saved booking
+  field is never rewritten; every container response still requires its own
+  positive BKG identity, correct container population, destination and count.
+- ONE tasks without both references remain discoverable for notification only.
+  After terminal/hold/exclusion checks and before freshness/preflight/lookup,
+  report missing information to the current assignees through the existing
+  concurrency-checked, cooldown-deduplicated comment path. Do not query a carrier,
+  stamp Last T&T Update, update dates/vessel or advance status. A pending booking
+  is not a carrier failure; owners must supply confirmed references when issued.
+- Regression tests: `tests/test_one_inventory_recovery.py`. Native ClickUp
+  departure automations remain outside this release, and 33793 stays held.

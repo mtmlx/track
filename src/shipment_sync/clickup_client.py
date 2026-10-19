@@ -158,7 +158,7 @@ class ClickUpClient:
             if _is_wan_hai_line(shipping_line) and self.settings.wan_hai_reference_hints_from_comments:
                 reference_hints = self._fetch_wan_hai_reference_hints(str(task.get("id") or ""))
             if not booking_no and not container_no:
-                if not reference_hints:
+                if not reference_hints and carrier_name(shipping_line) != 'ONE':
                     continue
 
             list_obj = task.get("list") if isinstance(task.get("list"), dict) else {}

@@ -154,6 +154,15 @@ def _run_sync(
                     message=f"Task status {shipment.current_task_status!r} is terminal for Track & Trace.",
                 )
             continue
+        if (line_name == 'one' and not (shipment.booking_no or '').strip()
+                and not (shipment.container_no or '').strip()):
+            reason = 'Missing booking and container references; tracking cannot start until a confirmed reference is entered'
+            _notify_tracking_failure(client, shipment, reason, phase='references')
+            skipped += 1
+            print(terminal_safe_text(f'Skipped task {shipment.task_id} ({shipment.task_name}): {reason}'), file=sys.stderr)
+            if audit is not None:
+                audit.log_task(shipment=shipment, outcome='skipped_missing_references', message=reason)
+            continue
         min_sync_interval_hours = _shipment_min_sync_interval_hours(
             shipment.shipping_line,
             default_min_sync_interval_hours,
