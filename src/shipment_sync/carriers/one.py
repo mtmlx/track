@@ -460,7 +460,7 @@ def _booking_origin_forecast(row: dict[str, Any], event: dict[str, Any]) -> Move
     raw = event.get("date")
     local = event.get("localPortDate")
     if not raw or not local:
-        return None
+        raise ValueError("ONE booking origin departure has incomplete port-local schedule evidence")
     # ONE's localPortDate is a wall-clock rendering (sometimes suffixed Z),
     # not the UTC instant. Preserve both; never derive the origin date in MX.
     date = datetime.fromisoformat(raw.replace("Z", "+00:00"))
