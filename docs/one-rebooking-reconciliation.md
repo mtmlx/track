@@ -102,7 +102,8 @@ complete population, explicit confirmation and matching shipment POD checks.
 Departure location must exactly match the carrier POR name/code; do not infer
 port aliases from geography or country fields. Preserve the UTC instant and
 ONE's port-local wall-clock rendering separately. Conflicting origin schedules
-and timezone-less departure dates fail closed.
+and timezone-less departure dates fail closed. Without an explicit port-local
+departure rendering, preserve the saved ETD rather than substituting a UTC day.
 
 This forecast is not added to physical movement history. Booking-wide actual
 events cannot establish pickup, loading, transit, discharge or return without

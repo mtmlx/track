@@ -60,7 +60,7 @@ def test_edh_unconfirmed_booking_never_publishes_forecast(booking_source,booking
 
 
 @pytest.mark.parametrize('change', ['missing_por','missing_code','wrong_location','destination_as_origin',
-                                  'wrong_pod','missing_date','actual','unknown_trigger','inland'])
+                                  'wrong_pod','actual','unknown_trigger','inland'])
 def test_booking_origin_requires_matching_explicit_forecast_evidence(booking_source,change):
     adapter,s,row=booking_source
     event=row['cargoEvents'][0]
@@ -69,7 +69,6 @@ def test_booking_origin_requires_matching_explicit_forecast_evidence(booking_sou
     elif change=='wrong_location': event['locationName']='KAOHSIUNG'
     elif change=='destination_as_origin': row['por']['code']='GTPRQ'
     elif change=='wrong_pod': row['pod']['code']='PABLB'
-    elif change=='missing_date': event.pop('date')
     elif change=='actual': event['trigger']='ACTUAL'
     elif change=='unknown_trigger': event['trigger']='UNKNOWN'
     elif change=='inland': event['matrixId']='E051'
@@ -88,6 +87,17 @@ def test_booking_origin_conflicting_schedules_fail_closed(booking_source):
     adapter,s,row=booking_source
     row['cargoEvents'].append(dict(row['cargoEvents'][0],date='2026-11-13T17:00:00Z'))
     with pytest.raises(ValueError,match='conflicting origin'):
+        adapter._fetch_booking_only_status(s)
+
+
+@pytest.mark.parametrize('key',['date','localPortDate'])
+@pytest.mark.parametrize('mixed',[False,True])
+def test_incomplete_matching_departure_cannot_hide_ambiguous_schedule(booking_source,key,mixed):
+    adapter,s,row=booking_source
+    if mixed:
+        row['cargoEvents'].append(dict(row['cargoEvents'][0],date='2026-11-13T17:00:00Z'))
+    row['cargoEvents'][0].pop(key)
+    with pytest.raises(ValueError,match='incomplete port-local schedule'):
         adapter._fetch_booking_only_status(s)
 
 
