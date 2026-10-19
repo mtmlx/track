@@ -143,6 +143,15 @@ def test_ambiguous_origin_schedules_hold_before_writes(monkeypatch):
         client(monkeypatch, [(rows, {})]).fetch_status(shipment())
 
 
+def test_schedule_conflict_notice_explains_issue_impact_and_correction():
+    from shipment_sync.tracking_failures import classify_failure
+    notice = classify_failure(shipment(), 'ONE booking has conflicting origin departure schedules; confirm the rebooking before updating')
+    assert notice.category == 'booking_schedule_conflict'
+    assert 'incorrect status' in notice.reason
+    assert 'cutoff' in notice.actions[0]
+    assert 'Do not change container identities' in notice.actions[1]
+
+
 def test_missing_origin_does_not_borrow_transshipment_departure():
     now = datetime.now(timezone.utc)
     moves = [MovementEvent('Container Loaded (LOAD)', event_time=now, location_code='CNHFE'),
