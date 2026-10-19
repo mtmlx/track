@@ -703,8 +703,11 @@ class ClickUpClient:
 
     def plan_shipment_update(self, shipment: ShipmentRef, status: ShipmentStatus) -> ShipmentUpdatePlan:
         if carrier_name(shipment.shipping_line) == "Maersk":
+            from .carriers.maersk import select_destination_arrival
+
             # Partial feeds cannot establish destination from the last DISC.
-            status = replace(status, require_destination_evidence=True,
+            status = replace(select_destination_arrival(status, shipment.destination_port),
+                             require_destination_evidence=True,
                              destination_port=shipment.destination_port)
         if status.require_destination_evidence and shipment.destination_port:
             # A conflicting carrier POD must not override the shipment's destination.
