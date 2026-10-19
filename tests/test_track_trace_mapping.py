@@ -68,6 +68,12 @@ def test_plan_shipment_update_maps_origin_and_destination_events_to_fields() -> 
         eta_local_text="2026-03-25 14:00",
         recent_moves=[
             MovementEvent(
+                name="Transport Arrived (ARRI)", location="GTPRQ",
+                event_time=datetime(2026, 3, 25, 8, tzinfo=timezone.utc),
+                event_time_local_text="2026-03-25 14:00",
+                event_state="estimated", transport_mode="VESSEL",
+            ),
+            MovementEvent(
                 name="Container Gated In (GTIN)",
                 location="PUERTO QUETZAL",
                 event_time=datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
@@ -181,11 +187,18 @@ def test_plan_shipment_update_does_not_update_task_status_even_when_enabled() ->
         booking_no="BOOK-STATUS",
         container_no="CONT-STATUS",
         list_id="list-1",
+        destination_port="GTPRQ",
     )
     status = ShipmentStatus(
         status_text="In transit",
         eta_time=datetime(2026, 3, 25, 8, 0, tzinfo=timezone.utc),
         eta_local_text="2026-03-25 14:00",
+        recent_moves=[MovementEvent(
+            name="Transport Arrived (ARRI)", location="GTPRQ",
+            event_time=datetime(2026, 3, 25, 8, tzinfo=timezone.utc),
+            event_time_local_text="2026-03-25 14:00",
+            event_state="estimated", transport_mode="VESSEL",
+        )],
     )
 
     plan = client.plan_shipment_update(shipment, status)
@@ -978,12 +991,18 @@ def test_plan_shipment_update_prefers_confirmed_final_vessel_before_departure() 
         container_no=None,
         list_id="list-1",
         current_field_values={"vessel-voyage-field": "POLAR PERU 626N"},
+        destination_port="GTPRQ",
     )
     status = ShipmentStatus(
         status_text="ETA future",
         vessel_voyage="MAERSK SEQUOIA 631N",
         final_vessel_voyage="MAERSK SEQUOIA 631N",
         recent_moves=[
+            MovementEvent(
+                name="Transport Arrived (ARRI)", location="GTPRQ",
+                event_time=_days_from_now(2), event_state="estimated",
+                vessel_voyage="MAERSK SEQUOIA 631N", transport_mode="VESSEL",
+            ),
             MovementEvent(
                 name="Transport Arrived (ARRI)",
                 location="BALBOA",

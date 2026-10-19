@@ -17,7 +17,8 @@ def _plan(code="LOAD", classifier="ACT", mode="VESSEL", days=-4, extra=None,
              "equipmentEventTypeCode" if code == "LOAD" else "transportEventTypeCode": code}
     event.update(extra or {})
     shipment = ShipmentRef("86e3dgd2j", "MTMLXGT-33773", carrier, "277740394",
-        "MRSU8843754", "list", current_task_status=current, destination_port="GTPBR")
+        "MRSU8843754", "list", current_task_status=current, destination_port="GTPBR",
+        current_field_values={"eta-field": str(int((now + timedelta(days=4)).timestamp() * 1000))})
     status = ShipmentStatus("Tracking", eta_time=now + timedelta(days=4),
         recent_moves=[_event_to_movement(event)],
         booking_only=booking_only)
