@@ -60,7 +60,7 @@ def test_edh_unconfirmed_booking_never_publishes_forecast(booking_source,booking
 
 
 @pytest.mark.parametrize('change', ['missing_por','missing_code','wrong_location','destination_as_origin',
-                                  'wrong_pod','missing_date','actual','unknown_trigger','inland'])
+                                  'wrong_pod','missing_date','missing_local_date','actual','unknown_trigger','inland'])
 def test_booking_origin_requires_matching_explicit_forecast_evidence(booking_source,change):
     adapter,s,row=booking_source
     event=row['cargoEvents'][0]
@@ -70,6 +70,7 @@ def test_booking_origin_requires_matching_explicit_forecast_evidence(booking_sou
     elif change=='destination_as_origin': row['por']['code']='GTPRQ'
     elif change=='wrong_pod': row['pod']['code']='PABLB'
     elif change=='missing_date': event.pop('date')
+    elif change=='missing_local_date': event.pop('localPortDate')
     elif change=='actual': event['trigger']='ACTUAL'
     elif change=='unknown_trigger': event['trigger']='UNKNOWN'
     elif change=='inland': event['matrixId']='E051'

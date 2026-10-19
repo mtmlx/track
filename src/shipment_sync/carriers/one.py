@@ -458,14 +458,14 @@ def _booking_origin_forecast(row: dict[str, Any], event: dict[str, Any]) -> Move
                 port, str(origin.get("locationName") or "").strip().upper()}):
         return None
     raw = event.get("date")
-    if not raw:
+    local = event.get("localPortDate")
+    if not raw or not local:
         return None
     # ONE's localPortDate is a wall-clock rendering (sometimes suffixed Z),
     # not the UTC instant. Preserve both; never derive the origin date in MX.
     date = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     if date.tzinfo is None:
         raise ValueError("ONE booking origin departure lacks an explicit timezone")
-    local = event.get("localPortDate") or raw
     local_date = datetime.fromisoformat(local.replace("Z", "+00:00"))
     if local_date.tzinfo is None:
         raise ValueError("ONE booking origin local departure lacks an explicit timezone")
