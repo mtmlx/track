@@ -12,6 +12,121 @@ from test_one_dcsa import booking_event, client, event, sailing_event, shipment
 from test_track_trace_mapping import _settings
 
 
+@pytest.fixture
+def booking_source(monkeypatch):
+    import shipment_sync.carriers.one as one
+    payload = {'status':200, 'total':1, 'data':[{
+        'bookingNo':'BOOK', 'latestEvent':{'eventName':'Booking Confirmed'},
+        'por':{'code':'TWKEL','locationName':'KEELUNG'}, 'pod':{'code':'GTPRQ'},
+        'vesselVoyage':{'vesselName':'MONTEVIDEO EXPRESS','outboundConsortiumVoyage':'2645E'},
+        'cargoEvents':[{'matrixId':'E061','trigger':'ESTIMATED','locationName':'KEELUNG',
+                        'date':'2026-11-10T17:00:00Z','localPortDate':'2026-11-11T01:00:00Z'},
+                       {'matrixId':'E089','trigger':'ESTIMATED','locationName':'PUERTO QUETZAL',
+                        'date':'2026-12-26T10:00:00Z','localPortDate':'2026-12-26T04:00:00Z'}]}]}
+    class Response:
+        def raise_for_status(self): pass
+        def close(self): pass
+    adapter=one.OneAdapter()
+    monkeypatch.setattr(adapter.session,'post',lambda *a,**k:Response())
+    monkeypatch.setattr(one,'bounded_response_json',lambda r:payload)
+    s=shipment(current_task_status='BK confirmado'); s.container_no=None
+    return adapter,s,payload['data'][0]
+
+
+def test_34725_booking_only_origin_uses_port_local_day_and_preserves_vessel(booking_source):
+    adapter,s,row=booking_source
+    s.current_field_values={'vessel-field':'VERIFIED DESTINATION VESSEL 123E'}
+    status=adapter._fetch_booking_only_status(s)
+    assert status.origin_departure.location_code=='TWKEL'
+    assert status.origin_departure.event_state=='estimated'
+    assert status.origin_departure.event_time.day==10
+    plan=writer().plan_shipment_update(s,status)
+    fields={u.field_id:u.value for u in plan.custom_field_updates}
+    assert fields['etd-field'].date().isoformat()=='2026-11-11'
+    assert status.final_vessel_voyage is None and status.vessel_voyage is None
+    assert 'vessel-field' not in fields
+    assert plan.task_status_update is None
+    assert not status.recent_moves and status.latest_move is None
+    assert not {'gtout-empty-field','gtin-full-field','disc-field'} & fields.keys()
+
+
+@pytest.mark.parametrize('booking_status',['Processing','Booking Cancelled','Booking Canceled','Unknown'])
+def test_edh_unconfirmed_booking_never_publishes_forecast(booking_source,booking_status):
+    adapter,s,row=booking_source
+    row['latestEvent']['eventName']=booking_status
+    status=adapter._fetch_booking_only_status(s)
+    assert status.origin_departure is None and status.eta_time is None
+    assert status.final_vessel_voyage is None
+
+
+@pytest.mark.parametrize('change', ['missing_por','missing_code','wrong_location','destination_as_origin',
+                                  'wrong_pod','missing_date','actual','unknown_trigger','inland'])
+def test_booking_origin_requires_matching_explicit_forecast_evidence(booking_source,change):
+    adapter,s,row=booking_source
+    event=row['cargoEvents'][0]
+    if change=='missing_por': row.pop('por')
+    elif change=='missing_code': row['por'].pop('code')
+    elif change=='wrong_location': event['locationName']='KAOHSIUNG'
+    elif change=='destination_as_origin': row['por']['code']='GTPRQ'
+    elif change=='wrong_pod': row['pod']['code']='PABLB'
+    elif change=='missing_date': event.pop('date')
+    elif change=='actual': event['trigger']='ACTUAL'
+    elif change=='unknown_trigger': event['trigger']='UNKNOWN'
+    elif change=='inland': event['matrixId']='E051'
+    assert adapter._fetch_booking_only_status(s).origin_departure is None
+
+
+@pytest.mark.parametrize('key',['date','localPortDate'])
+def test_booking_origin_naive_timestamp_fails_closed(booking_source,key):
+    adapter,s,row=booking_source
+    row['cargoEvents'][0][key]='2026-11-11T01:00:00'
+    with pytest.raises(ValueError,match='explicit timezone'):
+        adapter._fetch_booking_only_status(s)
+
+
+def test_booking_origin_conflicting_schedules_fail_closed(booking_source):
+    adapter,s,row=booking_source
+    row['cargoEvents'].append(dict(row['cargoEvents'][0],date='2026-11-13T17:00:00Z'))
+    with pytest.raises(ValueError,match='conflicting origin'):
+        adapter._fetch_booking_only_status(s)
+
+
+def test_past_booking_forecast_does_not_prove_transit(booking_source):
+    adapter,s,row=booking_source
+    row['cargoEvents'][0].update(date='2026-01-01T10:00:00Z',localPortDate='2026-01-01T18:00:00Z')
+    status=adapter._fetch_booking_only_status(s)
+    plan=writer().plan_shipment_update(s,status)
+    assert plan.task_status_update is None
+    assert not status.recent_moves
+
+
+def test_held_33793_remains_blocked_with_booking_origin_forecast(booking_source):
+    adapter,s,row=booking_source
+    s.task_id='86e3etkkm'
+    assert write_hold_reason(s)
+    with pytest.raises(ValueError,match='33793'):
+        writer().update_shipment_status(s,adapter._fetch_booking_only_status(s))
+
+
+def test_booking_forecast_projection_requires_supported_one_source(booking_source):
+    adapter,s,_=booking_source
+    status=adapter._fetch_booking_only_status(s)
+    status.raw_source='https://untrusted.example/events'
+    assert 'etd-field' not in {u.field_id for u in writer().plan_shipment_update(s,status).custom_field_updates}
+
+
+def test_identical_booking_departure_rows_are_idempotent(booking_source):
+    adapter,s,row=booking_source
+    row['cargoEvents'].append(dict(row['cargoEvents'][0]))
+    status=adapter._fetch_booking_only_status(s)
+    c=writer()
+    plan=c.plan_shipment_update(s,status)
+    s.current_field_values={u.field_id:int(u.value.timestamp()*1000) if isinstance(u.value,datetime) else u.value
+                            for u in plan.custom_field_updates}
+    s.track_trace_snapshot_hash=plan.snapshot_hash
+    assert not c.plan_shipment_update(s,status).changed
+
+
 def forecast_rows():
     return [
         event('empty', 'GTOT', 'CNSHA', days=-2, empty='EMPTY'),
