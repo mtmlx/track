@@ -12,7 +12,7 @@ def setup_capture(tmp_path):
     now = datetime.now(timezone.utc)
     manifest = {
         "schema_version": 1, "task_id": "testtask", "task_name": "TEST ONLY",
-        "list_id": "testlist", "booking_no": "TESTBOOK", "operator": "test operator",
+        "list_id": "testlist", "booking_no": "BOOK-1", "operator": "test operator",
         "destination_port": "Miami, US", "containers": ["MSCU1234567"],
         "task_reviewed_at": (now-timedelta(minutes=10)).isoformat(),
         "captured_at": (now-timedelta(minutes=5)).isoformat(),
