@@ -1573,6 +1573,22 @@ def _derive_operational_status_step(
     ):
         target_step = "booking_confirmed"
 
+    departure = status.origin_departure
+    # Actual origin gates prove terminal readiness, not sailing. A forecast
+    # that slips into the past must not strand the shipment at collection.
+    if (strict_one_origin and gate_out_empty_date is not None and gate_in_full_date is not None
+            and departure is not None and _event_code_from_move(departure) == "DEPA"
+            and _normalize_event_state(departure.event_state) == "estimated"
+            and _move_event_date(departure) is not None
+            and departure.location_code and departure.location_code != "AMBIGUOUS"
+            and not _move_at_destination(status, departure)
+            and (departure.transport_mode or "").strip().upper() not in {"TRUCK", "ROAD", "RAIL", "TRAIN"}
+            and any(_event_code_from_move(move) == "GTIN" and _move_is_actual(move)
+                    and move.equipment_load_state == "LADEN"
+                    and move.location_code == departure.location_code
+                    for move in status.recent_moves)):
+        target_step = _max_workflow_step(target_step, "origin_port")
+
     # A confirmed feeder-barge leg is operational transit. Carrier feeds do not
     # reliably expose the origin gate events for these moves, so do not block
     # this transition on manually maintained gate fields.
