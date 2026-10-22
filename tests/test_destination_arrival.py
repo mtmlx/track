@@ -9,6 +9,11 @@ from test_track_trace_mapping import _settings
 
 
 @pytest.mark.parametrize("destination,location,match", [
+    ("VERACRUZ, MEXICO", "Veracruz, MX", True),
+    ("Veracruz, MX", "VERACRUZ, MEXICO", True),
+    ("VERACRUZ, MEXICO", "Veracruz, US", False),
+    ("VERACRUZ, MEXICO", "Veracruz", False),
+    ("VERACRUZ, MEXICO", "Colon, PA", False),
     ("Puerto Cortes, HN", "Colón, PA", False),
     ("PUERTO CORTÉS", "Puerto Cortes, HN", True),
     ("HNPCR", "Puerto Cortes, Honduras", True),
