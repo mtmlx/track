@@ -1,9 +1,13 @@
 from datetime import datetime, timedelta, timezone
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
-from shipment_sync.msc_operator_pack import build_package, main
+from shipment_sync.msc_operator_pack import _read_capture, build_package, main
 from test_msc_browser_assisted import _capture
 
 
@@ -58,6 +62,67 @@ def test_rejects_wrong_visible_container(setup_capture):
     path.write_text(path.read_text().replace("MSCU1234567", "MSCU7654321"))
     with pytest.raises(ValueError, match="approved container"):
         build_package(manifest, directory, now=now)
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink", "fifo", "oversize"])
+def test_cli_rejects_nonregular_or_oversize_capture_without_hanging(setup_capture, tmp_path, kind):
+    manifest, directory, _ = setup_capture
+    capture = directory / "MSCU1234567.txt"
+    capture.unlink()
+    if kind == "directory":
+        capture.mkdir()
+    elif kind == "symlink":
+        capture.symlink_to(tmp_path / "missing-target")
+    elif kind == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("Named pipes are unavailable on this platform")
+        os.mkfifo(capture)
+    else:
+        capture.write_bytes(b"x" * 2_000_001)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    output = tmp_path / "handoff"
+    result = subprocess.run(
+        [sys.executable, "-m", "shipment_sync.msc_operator_pack", "--manifest", str(manifest_path),
+         "--captures-dir", str(directory), "--output-dir", str(output)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode != 0
+    assert "regular local text file" in result.stderr
+    assert not output.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="Named pipes are unavailable")
+def test_rechecks_open_descriptor_if_capture_is_replaced_with_fifo(tmp_path, monkeypatch):
+    capture = tmp_path / "capture.txt"
+    capture.write_text("original text")
+    original_open = os.open
+
+    def replaced_open(path, flags, *args, **kwargs):
+        capture.unlink()
+        os.mkfifo(capture)
+        assert flags & os.O_NONBLOCK
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", replaced_open)
+    with pytest.raises(ValueError, match="regular local text file"):
+        _read_capture(capture)
+
+
+def test_capture_read_is_bounded_even_when_file_grows(tmp_path, monkeypatch):
+    capture = tmp_path / "capture.txt"
+    capture.write_text("initial text")
+    original_fstat = os.fstat
+
+    def grow_after_stat(fd):
+        info = original_fstat(fd)
+        with capture.open("ab") as handle:
+            handle.write(b"x" * 2_000_001)
+        return info
+
+    monkeypatch.setattr(os, "fstat", grow_after_stat)
+    with pytest.raises(ValueError, match="regular local text file"):
+        _read_capture(capture)
 
 
 def test_cli_is_offline_private_and_no_overwrite(setup_capture, tmp_path, monkeypatch):

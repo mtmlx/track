@@ -6,8 +6,10 @@ import argparse
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 
 from shipment_sync.destination import same_port
 from shipment_sync.models import ShipmentRef
@@ -16,6 +18,27 @@ from shipment_sync.msc_browser_assisted import (
     consolidate_browser_statuses,
     status_from_browser_capture,
 )
+
+
+def _read_capture(path: Path) -> bytes:
+    error = "Capture must be a regular local text file no larger than 2 MB"
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError(error)
+        # Nonblocking open and descriptor validation also protect against a
+        # regular file being replaced with a FIFO between the check and open.
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_BINARY", 0)
+        with os.fdopen(os.open(path, flags), "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 2_000_000:
+                raise ValueError(error)
+            data = handle.read(2_000_001)
+            if len(data) > 2_000_000:
+                raise ValueError(error)
+            return data
+    except OSError as exc:
+        raise ValueError(error) from exc
 
 
 def _fresh_timestamp(value: object, now: datetime) -> datetime:
@@ -53,9 +76,7 @@ def build_package(manifest: dict, captures_dir: Path, *, now: datetime | None = 
     entries, batch, hashes = [], [], {}
     for container in containers:
         path = captures_dir / f"{container}.txt"
-        if path.is_symlink() or path.stat().st_size > 2_000_000:
-            raise ValueError("Capture must be a regular local text file no larger than 2 MB")
-        data = path.read_bytes()
+        data = _read_capture(path)
         capture = MscBrowserCapture(manifest["task_id"], data.decode("utf-8"), container)
         status = status_from_browser_capture(capture.capture)
         if set(status.discovered_containers) != {container}:
