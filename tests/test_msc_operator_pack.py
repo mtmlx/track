@@ -40,6 +40,16 @@ def test_package_is_existing_importer_compatible(setup_capture, tmp_path):
     assert len(report["capture_sha256"]["MSCU1234567.txt"]) == 64
 
 
+def test_package_accepts_exact_veracruz_country_alias(setup_capture):
+    manifest, directory, now = setup_capture
+    manifest['destination_port'] = 'VERACRUZ, MEXICO'
+    path = directory / 'MSCU1234567.txt'
+    path.write_text(path.read_text().replace('Miami, US', 'Veracruz, MX'))
+    batch, report = build_package(manifest, directory, now=now)
+    assert len(batch['captures']) == 1
+    assert report['destination_port'] == 'Veracruz, MX'
+
+
 @pytest.mark.parametrize("change", [
     {"destination_port": "HNPCR"}, {"destination_port": "unknown"},
     {"containers": ["MSCU1234567", "MSCU7654321"]},
