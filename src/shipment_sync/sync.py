@@ -1,5 +1,6 @@
 from .terminal import terminal_safe_text
 import sys
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from shipment_sync.carriers.registry import build_carrier_registry
 from shipment_sync.clickup_client import ClickUpClient
 from shipment_sync.config import Settings
 from shipment_sync.models import ShipmentRef, ShipmentStatus
+from shipment_sync.one_write_holds import write_hold_reason
 
 
 @dataclass
@@ -81,6 +83,7 @@ def _run_sync(
         )
 
     updated_items: list[UpdatedShipment] = []
+    client._tracking_notice_delivery_failures = 0
     unchanged = 0
     skipped = 0
     candidates_by_list: dict[str, int] = {}
@@ -110,6 +113,14 @@ def _run_sync(
 
     for shipment in all_shipments:
         line_name = shipment.shipping_line
+        hold = write_hold_reason(shipment)
+        if hold:
+            skipped += 1
+            print(terminal_safe_text(json.dumps({'event': 'tracking_write_hold',
+                'task_id': shipment.task_id, 'reason': hold})), file=sys.stderr)
+            if audit is not None:
+                audit.log_task(shipment=shipment, outcome='held_pending_repair', message=hold)
+            continue
         if line_name in excluded_lines:
             prefiltered_excluded_counts[line_name] = prefiltered_excluded_counts.get(line_name, 0) + 1
             if audit is not None:
@@ -142,6 +153,15 @@ def _run_sync(
                     outcome="prefiltered_terminal_status",
                     message=f"Task status {shipment.current_task_status!r} is terminal for Track & Trace.",
                 )
+            continue
+        if (line_name == 'one' and not (shipment.booking_no or '').strip()
+                and not (shipment.container_no or '').strip()):
+            reason = 'Missing booking and container references; tracking cannot start until a confirmed reference is entered'
+            _notify_tracking_failure(client, shipment, reason, phase='references')
+            skipped += 1
+            print(terminal_safe_text(f'Skipped task {shipment.task_id} ({shipment.task_name}): {reason}'), file=sys.stderr)
+            if audit is not None:
+                audit.log_task(shipment=shipment, outcome='skipped_missing_references', message=reason)
             continue
         min_sync_interval_hours = _shipment_min_sync_interval_hours(
             shipment.shipping_line,
@@ -180,6 +200,7 @@ def _run_sync(
             for shipment in eligible_shipments:
                 reason = preflight_failures.get(shipment.shipping_line)
                 if reason:
+                    _notify_tracking_failure(client, shipment, reason, phase='preflight')
                     failed_counts[shipment.shipping_line] = failed_counts.get(shipment.shipping_line, 0) + 1
                     if audit is not None:
                         audit.log_task(
@@ -217,6 +238,7 @@ def _run_sync(
 
         access_failure = carrier_access_failures.get(shipment.shipping_line)
         if access_failure is not None:
+            _notify_tracking_failure(client, shipment, access_failure, phase='not_queried')
             skipped += 1
             if audit is not None:
                 audit.log_task(
@@ -228,6 +250,7 @@ def _run_sync(
 
         adapter = adapters.get(shipment.shipping_line)
         if not adapter:
+            _notify_tracking_failure(client, shipment, 'No adapter registered for carrier')
             unsupported_line_counts[shipment.shipping_line] = unsupported_line_counts.get(shipment.shipping_line, 0) + 1
             if audit is not None:
                 audit.log_task(
@@ -238,9 +261,30 @@ def _run_sync(
             skipped += 1
             continue
 
+        failure_phase = 'lookup'
         try:
             status = _fetch_carrier_status(adapter, shipment)
+            if shipment.shipping_line == 'one':
+                # CloudWatch retains successful evidence even when no field changes.
+                evidence = {'event': 'one_tracking_validated', 'task_id': shipment.task_id,
+                    'checked_at': datetime.now(timezone.utc).isoformat(), 'source': status.raw_source,
+                    'booking_only': status.booking_only, 'booking_status': status.booking_status_text,
+                    'containers': status.discovered_containers,
+                    'origin_departure': (status.origin_departure.event_time_local_text
+                                         if status.origin_departure else None),
+                    'origin_departure_state': (status.origin_departure.event_state
+                                               if status.origin_departure else None),
+                    'destination_vessel': status.final_vessel_voyage,
+                    'eta': status.eta_local_text,
+                    'moves': [{'code': m.name, 'port': m.location_code, 'state': m.event_state,
+                               'time': m.event_time_local_text, 'vessel': m.vessel_voyage}
+                              for m in status.recent_moves]}
+                print(terminal_safe_text(json.dumps(evidence)), file=sys.stderr)
+            failure_phase = 'writeback'
             write_result = client.update_shipment_status(shipment, status)
+            if shipment.shipping_line == 'one':
+                print(terminal_safe_text(json.dumps({'event': 'one_tracking_writeback', 'task_id': shipment.task_id,
+                                  'outcome': 'updated' if write_result.changed else 'unchanged'})), file=sys.stderr)
             if write_result.changed:
                 updated_items.append(
                     UpdatedShipment(
@@ -282,13 +326,16 @@ def _run_sync(
                         message=write_result.status_value,
                     )
         except Exception as exc:
+            if failure_phase == 'writeback' and getattr(exc, 'shipment_sync_phase', None) == 'projection':
+                failure_phase = 'projection'
             message = str(exc)
-            if _carrier_access_denied(shipment.shipping_line, message):
+            if failure_phase == 'lookup' and _carrier_access_denied(shipment.shipping_line, message):
                 carrier_access_failures[shipment.shipping_line] = message
                 message = (
                     f"{message}. Carrier circuit breaker opened; remaining "
                     f"{shipment.shipping_line} shipments will not be queried in this run."
                 )
+            _notify_tracking_failure(client, shipment, message, phase=failure_phase)
             if "adapter not configured" in message.lower():
                 key = f"{shipment.shipping_line}: {message}"
                 adapter_config_counts[key] = adapter_config_counts.get(key, 0) + 1
@@ -300,20 +347,6 @@ def _run_sync(
                     )
                 skipped += 1
                 continue
-            if _wan_hai_manual_capture_needed(shipment.shipping_line, message):
-                try:
-                    posted = client.request_wan_hai_manual_capture(shipment, error=message)
-                except Exception as comment_exc:
-                    posted = False
-                    print(
-                        terminal_safe_text(f"Wan Hai manual capture comment failed for task {shipment.task_id}: {comment_exc}"),
-                        file=sys.stderr,
-                    )
-                if posted:
-                    print(
-                        terminal_safe_text(f"Wan Hai manual capture requested for task {shipment.task_id} ({shipment.task_name})."),
-                        file=sys.stderr,
-                    )
             print(
                 terminal_safe_text(f"Skipped task {shipment.task_id} ({shipment.task_name}): {exc}"),
                 file=sys.stderr,
@@ -382,6 +415,26 @@ def _list_label(list_name: str | None, list_id: str) -> str:
     return list_id
 
 
+def _notify_tracking_failure(client: ClickUpClient, shipment: ShipmentRef, error: str,
+                             *, phase: str = 'lookup', method: str = 'automated carrier adapter',
+                             reference: str | None = None) -> bool:
+    try:
+        if phase == 'lookup' and _wan_hai_manual_capture_needed(shipment.shipping_line, error):
+            posted = client.request_wan_hai_manual_capture(shipment, error=error)
+        elif phase == 'lookup' and _one_booking_conflict(shipment.shipping_line, error):
+            posted = client.report_one_booking_conflict(shipment)
+        else:
+            posted = client.report_tracking_failure(shipment, error=error, phase=phase, method=method, reference=reference)
+        if posted:
+            print(terminal_safe_text(f'T&T failure comment posted for task {shipment.task_id}.'), file=sys.stderr)
+        return posted
+    except Exception as exc:
+        # Notification delivery must not stop other shipments or expose raw HTTP data.
+        print(terminal_safe_text(
+            f'T&T failure comment not verified for task {shipment.task_id}: {type(exc).__name__}'), file=sys.stderr)
+        return False
+
+
 def _terminal_shipment_status(status: str | None, terminal_statuses: tuple[str, ...]) -> str | None:
     normalized = _normalize_status_name(status or "")
     if not normalized:
@@ -396,6 +449,18 @@ def _normalize_status_name(value: str) -> str:
     decomposed = unicodedata.normalize("NFKD", value)
     ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     return re.sub(r"[^a-z0-9]+", "", ascii_text.lower())
+
+
+def _one_booking_conflict(shipping_line: str, message: str) -> bool:
+    return shipping_line.strip().lower() == "one" and message in {
+        "ONE DCSA returned a conflicting booking",
+        "ONE booking lookup identity mismatch",
+        "ONE booking lifecycle event lacks matching booking identity",
+        "ONE DCSA booking does not include the listed containers",
+        "ONE DCSA returned a conflicting container",
+        "ONE DCSA mapped an unexpected container population",
+        "ONE DCSA container population does not match the shipment count",
+    }
 
 
 def _wan_hai_manual_capture_needed(shipping_line: str, message: str) -> bool:
@@ -593,6 +658,8 @@ def _preflight_hosts_for_line(line_name: str) -> list[str]:
     hosts: list[str] = []
 
     if normalized in {"one", "ocean network express"}:
+        if _env_bool("ONE_DCSA_ENABLED", False):
+            return ["apix.one-line.com"]
         one_use_edh = _env_bool("ONE_USE_EDH_API", True)
         one_template = os.getenv("ONE_TRACKING_URL_TEMPLATE", "").strip()
         one_api_url = os.getenv("ONE_TRACKING_API_URL", "").strip()

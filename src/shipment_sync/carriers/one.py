@@ -28,6 +28,8 @@ from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
 
 class OneAdapter(CarrierAdapter):
     def __init__(self) -> None:
+        self.use_dcsa_api = _env_bool('ONE_DCSA_ENABLED', default=False)
+        self.dcsa_client = None
         self.eta_only_mode = _env_bool("SHIPMENT_ETA_ONLY", default=True)
         self.use_edh_api = _env_bool("ONE_USE_EDH_API", default=True)
         self.edh_base_url = os.getenv("ONE_EDH_BASE_URL", "https://ecomm.one-line.com/api/v1/edh").strip().rstrip("/")
@@ -45,6 +47,16 @@ class OneAdapter(CarrierAdapter):
         self.session = requests.Session()
 
     def fetch_status(self, shipment: ShipmentRef) -> ShipmentStatus:
+        if self.use_dcsa_api:
+            from shipment_sync.carriers.one_dcsa import OneDcsaClient, BookingLifecycleUnavailable
+            if self.dcsa_client is None:
+                self.dcsa_client = OneDcsaClient()
+            try:
+                return self.dcsa_client.fetch_status(shipment)
+            except BookingLifecycleUnavailable:
+                if shipment.container_no or not self.use_edh_api:
+                    raise
+                return self._fetch_booking_only_status(shipment)
         reference, ref_type_code, preferred_container_no = _pick_search_reference(
             shipment,
             self.booking_type_code,
@@ -59,7 +71,8 @@ class OneAdapter(CarrierAdapter):
                 preferred_container_no=preferred_container_no,
             )
             if edh_status is not None:
-                return edh_status
+                return replace(edh_status, destination_port=shipment.destination_port,
+                               require_destination_evidence=True)
 
         payload, source = self._fetch_payload(reference, ref_type_code)
         discovered_containers = extract_container_numbers(payload)
@@ -112,6 +125,60 @@ class OneAdapter(CarrierAdapter):
             source_url=source_url,
             movement_details=movement_details,
         )
+
+    def _fetch_booking_only_status(self, shipment: ShipmentRef) -> ShipmentStatus:
+        from shipment_sync.destination import same_port
+        url = f"{self.edh_base_url}/containers/track-and-trace/search"
+        response = self.session.post(
+            url, json={"page": 1, "page_length": 10,
+                       "filters": {"search_text": shipment.booking_no, "search_type": "BKG_NO"}},
+            timeout=self.timeout_seconds, stream=True, allow_redirects=False,
+            hooks={"response": reject_response_redirect})
+        try:
+            response.raise_for_status()
+            payload = bounded_response_json(response)
+        finally:
+            response.close()
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if (not isinstance(rows, list) or not rows or payload.get("status") != 200
+                or payload.get("total") != len(rows)):
+            raise ValueError("ONE booking lookup is unavailable or incomplete")
+        if any(not isinstance(row, dict) or row.get("bookingNo") != shipment.booking_no for row in rows):
+            raise ValueError("ONE booking lookup identity mismatch")
+        if extract_container_numbers(payload):
+            raise ValueError("ONE booking lookup has assigned containers; require container-level verification")
+        statuses = {_extract_booking_status_text(row) for row in rows}
+        if len(statuses) != 1 or None in statuses:
+            raise ValueError("ONE booking lookup has ambiguous confirmation evidence")
+        booking_status = statuses.pop()
+        confirmed = booking_status.strip().lower() in {"confirmed", "booking confirmed"}
+        arrivals, departures = [], []
+        if confirmed:
+            for row in rows:
+                if not same_port(shipment.destination_port, (row.get("pod") or {}).get("code")):
+                    continue
+                for event in row.get("cargoEvents") or []:
+                    departure = _booking_origin_forecast(row, event)
+                    if departure is not None:
+                        departures.append(departure)
+                    if (event.get("matrixId") == "E089" and event.get("trigger") == "ESTIMATED"
+                            and same_port(shipment.destination_port, event.get("locationName"))):
+                        date = parse_event_time(event.get("date"))
+                        if date is not None and date.tzinfo is not None:
+                            arrivals.append((date, event.get("localPortDate") or event["date"]))
+        if len({date for date, _ in arrivals}) > 1:
+            raise ValueError("ONE booking lookup has conflicting destination schedules")
+        if len({(move.location_code, move.event_time, move.event_time_local_text) for move in departures}) > 1:
+            raise ValueError("ONE booking lookup has conflicting origin departure schedules")
+        arrival = arrivals[0] if arrivals else None
+        return ShipmentStatus(
+            status_text=booking_status, booking_status_text=booking_status, booking_only=True,
+            eta_time=arrival[0] if arrival else None, eta_local_text=arrival[1] if arrival else None,
+            origin_departure=departures[0] if departures else None,
+            raw_source=url, source_url=_build_one_tracking_url(shipment.booking_no, "B", "C"),
+            destination_port=shipment.destination_port, require_destination_evidence=True,
+            movement_details="Explicit booking lifecycle; containers not assigned. Origin schedule is forecast only. "
+                             "No physical milestones inferred; booking header is not destination-vessel evidence.")
 
     def _fetch_status_from_edh(
         self,
@@ -332,6 +399,8 @@ class OneAdapter(CarrierAdapter):
                     event_time_local_text=local_time_text,
                     event_state=event_state,
                     vessel_voyage=_extract_one_event_vessel_voyage(event),
+                    source_event_name=event_name,
+                    location_code=_safe_text(location_obj.get("code")),
                 )
             )
 
@@ -375,6 +444,34 @@ class OneAdapter(CarrierAdapter):
         )
         payload = extract_json_from_http_response(response)
         return payload, f"one-api:{self.api_url}"
+
+
+def _booking_origin_forecast(row: dict[str, Any], event: dict[str, Any]) -> MovementEvent | None:
+    if event.get("matrixId") != "E061" or event.get("trigger") != "ESTIMATED":
+        return None
+    origin = row.get("por") or {}
+    port = origin.get("code")
+    name = event.get("locationName")
+    if (not isinstance(port, str) or not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}", port)
+            or port == (row.get("pod") or {}).get("code") or not isinstance(name, str)
+            or not name.strip() or name.strip().upper() not in {
+                port, str(origin.get("locationName") or "").strip().upper()}):
+        return None
+    raw = event.get("date")
+    local = event.get("localPortDate")
+    if not raw or not local:
+        raise ValueError("ONE booking origin departure has incomplete port-local schedule evidence")
+    # ONE's localPortDate is a wall-clock rendering (sometimes suffixed Z),
+    # not the UTC instant. Preserve both; never derive the origin date in MX.
+    date = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if date.tzinfo is None:
+        raise ValueError("ONE booking origin departure lacks an explicit timezone")
+    local_date = datetime.fromisoformat(local.replace("Z", "+00:00"))
+    if local_date.tzinfo is None:
+        raise ValueError("ONE booking origin local departure lacks an explicit timezone")
+    return MovementEvent(
+        name="Transport Departed (DEPA)", location=name, location_code=port,
+        event_time=date, event_time_local_text=local, event_state="estimated", transport_mode="VESSEL")
 
 
 def _extract_one_event_vessel_voyage(event: dict[str, Any]) -> str | None:

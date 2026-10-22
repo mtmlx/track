@@ -60,12 +60,19 @@ def test_plan_shipment_update_maps_origin_and_destination_events_to_fields() -> 
         booking_no="BOOK-1",
         container_no="CONT-1",
         list_id="list-1",
+        destination_port="GTPRQ",
     )
     status = ShipmentStatus(
         status_text="In transit",
         eta_time=datetime(2026, 3, 25, 8, 0, tzinfo=timezone.utc),
         eta_local_text="2026-03-25 14:00",
         recent_moves=[
+            MovementEvent(
+                name="Transport Arrived (ARRI)", location="GTPRQ",
+                event_time=datetime(2026, 3, 25, 8, tzinfo=timezone.utc),
+                event_time_local_text="2026-03-25 14:00",
+                event_state="estimated", transport_mode="VESSEL",
+            ),
             MovementEvent(
                 name="Container Gated In (GTIN)",
                 location="PUERTO QUETZAL",
@@ -180,11 +187,18 @@ def test_plan_shipment_update_does_not_update_task_status_even_when_enabled() ->
         booking_no="BOOK-STATUS",
         container_no="CONT-STATUS",
         list_id="list-1",
+        destination_port="GTPRQ",
     )
     status = ShipmentStatus(
         status_text="In transit",
         eta_time=datetime(2026, 3, 25, 8, 0, tzinfo=timezone.utc),
         eta_local_text="2026-03-25 14:00",
+        recent_moves=[MovementEvent(
+            name="Transport Arrived (ARRI)", location="GTPRQ",
+            event_time=datetime(2026, 3, 25, 8, tzinfo=timezone.utc),
+            event_time_local_text="2026-03-25 14:00",
+            event_state="estimated", transport_mode="VESSEL",
+        )],
     )
 
     plan = client.plan_shipment_update(shipment, status)
@@ -823,6 +837,53 @@ def test_plan_shipment_update_replaces_barge_with_latest_actual_mother_vessel() 
     assert updates["Vessel/Voyage"].value == "MSC MOTHER 123E"
 
 
+def test_msc_transshipment_discharge_updates_voyage_without_destination_arrival() -> None:
+    client = ClickUpClient(_settings(cf_vessel_voyage="vessel-field"))
+    shipment = ShipmentRef(
+        task_id="msc-discharge", task_name="MSC", shipping_line="msc",
+        booking_no="BOOK", container_no="CONT", list_id="list-1",
+        destination_port="Puerto Cortes", current_task_status="transito",
+        current_field_values={"vessel-field": "BARGE"},
+    )
+    status = ShipmentStatus(
+        status_text="In transit", destination_port="Puerto Cortes",
+        require_destination_evidence=True,
+        recent_moves=[
+            MovementEvent(name="Container Loaded (LOAD)", event_time=_days_from_now(-8),
+                          event_state="actual", location="Ningbo", vessel_voyage="MSC RANIA VIII GN625E"),
+            MovementEvent(name="Container Discharged (DISC)", event_time=_days_from_now(-2),
+                          event_state="actual", location="Colon", vessel_voyage="MSC RANIA VIII NH631R"),
+        ],
+    )
+    plan = client.plan_shipment_update(shipment, status)
+    fields = {f.field_id: f.value for f in plan.custom_field_updates}
+    assert fields["vessel-field"] == "MSC RANIA VIII NH631R"
+    assert "disc-field" not in fields
+    assert plan.task_status_update is None
+    shipment.current_field_values.update(fields)
+    repeat = client.plan_shipment_update(shipment, status)
+    assert not any(f.field_id in {"vessel-field", "disc-field"} for f in repeat.custom_field_updates)
+
+
+def test_msc_latest_vessel_rejects_unconfirmed_future_and_equipment_labels() -> None:
+    from shipment_sync.clickup_client import _latest_actual_event_vessel_voyage
+    now = datetime.now(timezone.utc)
+    good = MovementEvent(name="Container Loaded (LOAD)", event_time=now-timedelta(days=8),
+                         event_state="actual", vessel_voyage="MSC VALID 1E")
+    for state, when, vessel in [
+        ("estimated", now-timedelta(days=1), "MSC BAD 2E"),
+        (None, now-timedelta(days=1), "MSC BAD 2E"),
+        ("actual", None, "MSC BAD 2E"),
+        ("actual", now+timedelta(days=1), "MSC BAD 2E"),
+        ("actual", now-timedelta(days=1), "EMPTY"),
+        ("actual", now-timedelta(days=1), "LADEN"),
+    ]:
+        bad = MovementEvent(name="Container Discharged (DISC)", event_time=when,
+                            event_state=state, vessel_voyage=vessel)
+        status = ShipmentStatus(status_text="Transit", recent_moves=[bad, good])
+        assert _latest_actual_event_vessel_voyage(status, now_utc=now, include_discharge=True) == "MSC VALID 1E"
+
+
 def test_plan_shipment_update_does_not_label_normal_one_ocean_leg_as_barge() -> None:
     client = ClickUpClient(_settings(cf_vessel_voyage="vessel-voyage-field"))
     shipment = ShipmentRef(
@@ -930,12 +991,18 @@ def test_plan_shipment_update_prefers_confirmed_final_vessel_before_departure() 
         container_no=None,
         list_id="list-1",
         current_field_values={"vessel-voyage-field": "POLAR PERU 626N"},
+        destination_port="GTPRQ",
     )
     status = ShipmentStatus(
         status_text="ETA future",
         vessel_voyage="MAERSK SEQUOIA 631N",
         final_vessel_voyage="MAERSK SEQUOIA 631N",
         recent_moves=[
+            MovementEvent(
+                name="Transport Arrived (ARRI)", location="GTPRQ",
+                event_time=_days_from_now(2), event_state="estimated",
+                vessel_voyage="MAERSK SEQUOIA 631N", transport_mode="VESSEL",
+            ),
             MovementEvent(
                 name="Transport Arrived (ARRI)",
                 location="BALBOA",
@@ -1243,7 +1310,7 @@ def test_plan_shipment_update_skips_estimated_destination_dates() -> None:
     assert "Gate in empty" not in updates
 
 
-def test_plan_shipment_update_clears_estimated_destination_dates_already_in_clickup() -> None:
+def test_plan_shipment_update_preserves_historical_dates_without_actual_destination_evidence() -> None:
     client = ClickUpClient(_settings())
 
     def ms(year: int, month: int, day: int) -> str:
@@ -1290,9 +1357,9 @@ def test_plan_shipment_update_clears_estimated_destination_dates_already_in_clic
 
     updates = {update.label: update for update in plan.custom_field_updates}
     assert plan.changed is True
-    assert updates["Discharge date"].value is None
-    assert updates["Gate out delivery"].value is None
-    assert updates["Gate in empty"].value is None
+    assert "Discharge date" not in updates
+    assert "Gate out delivery" not in updates
+    assert "Gate in empty" not in updates
 
 
 def test_plan_shipment_update_only_refreshes_last_checked_when_all_values_match() -> None:
@@ -1472,6 +1539,32 @@ def test_plan_shipment_update_prefers_first_load_port_departure_for_etd() -> Non
 
     updates = {update.label: update for update in plan.custom_field_updates}
     assert updates["ETD"].value.date().isoformat() == "2026-03-11"
+
+
+def test_one_etd_repairs_transshipment_date_and_does_not_restore_it() -> None:
+    from dataclasses import replace
+
+    client = ClickUpClient(_settings())
+    shipment = ShipmentRef(
+        task_id="86e1gxd50", task_name="Chongqing origin", shipping_line="one",
+        booking_no="CKGG02226900", container_no="ONEU0511481", list_id="list-1",
+        current_field_values={"etd-field": str(int(datetime(2026, 9, 7, 10, tzinfo=timezone.utc).timestamp() * 1000))},
+    )
+    status = ShipmentStatus(status_text="In transit", recent_moves=[
+        MovementEvent(name="Container Gated In (GTIN)", location="CHONGQING, CHINA(FULL TERMINAL)",
+                      event_time=datetime(2026, 6, 26, tzinfo=timezone.utc), event_state="actual"),
+        MovementEvent(name="Transport Departed (DEPA)", location="CHONGQING, CHINA(FULL TER...",
+                      event_time=datetime(2026, 7, 1, tzinfo=timezone.utc), event_state="actual"),
+        MovementEvent(name="Container Loaded (LOAD)", location="PUSAN, KOREA(FULL TERMINAL)",
+                      event_time=datetime(2026, 9, 7, tzinfo=timezone.utc), event_state="actual"),
+        MovementEvent(name="Transport Departed (DEPA)", location="PUSAN, KOREA(FULL TER...",
+                      event_time=datetime(2026, 9, 8, tzinfo=timezone.utc), event_state="actual"),
+    ])
+    update = next(w for w in client.plan_shipment_update(shipment, status).custom_field_updates if w.label == "ETD")
+    assert update.value.date().isoformat() == "2026-07-01"
+    corrected = replace(shipment, current_field_values={"etd-field": str(int(datetime(2026, 7, 1, 10, tzinfo=timezone.utc).timestamp() * 1000))})
+    for _ in range(3):
+        assert not any(w.label == "ETD" for w in client.plan_shipment_update(corrected, status).custom_field_updates)
 
 
 def test_plan_shipment_update_falls_back_to_first_departure_when_origin_ready_event_is_missing() -> None:

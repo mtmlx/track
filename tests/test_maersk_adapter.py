@@ -17,6 +17,7 @@ def _shipment() -> ShipmentRef:
         booking_no=None,
         container_no="CAAU8312730",
         list_id="list-1",
+        destination_port="MANZANILLO MX",
     )
 
 
@@ -53,7 +54,16 @@ def test_maersk_events_404_uses_public_browser_fallback(monkeypatch) -> None:
                     location="SAN ANTONIO",
                     event_time=datetime(2026, 7, 8, 23, 29, tzinfo=timezone.utc),
                     event_state="actual",
-                )
+                ),
+                MovementEvent(
+                    name="Transport Arrived (ARRI)",
+                    location="MANZANILLO MX",
+                    event_time=datetime(2026, 8, 16, 23, tzinfo=timezone.utc),
+                    event_time_local_text="2026-08-16 23:00",
+                    event_state="estimated",
+                    vessel_voyage="MAERSK EVORA 632W",
+                    transport_mode="VESSEL",
+                ),
             ],
             vessel_voyage="MAERSK EVORA 632W",
             raw_source=f"maersk-public-browser:https://www.maersk.com/tracking/{reference}",
@@ -312,6 +322,7 @@ def test_maersk_status_uses_estimated_final_arrival_for_eta_and_vessel() -> None
         ],
         "maersk-events-api:test",
         source_url="https://www.maersk.com/tracking/272124460",
+        destination_port="GTPRQ",
     )
 
     assert status.eta_time == datetime(2026, 8, 3, 21, tzinfo=timezone.utc)

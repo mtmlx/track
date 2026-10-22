@@ -26,6 +26,8 @@ from .models import (
     ShipmentUpdatePlan,
     ShipmentWriteResult,
 )
+from .tracking_failures import carrier_name, classify_failure, failure_comment
+from .one_write_holds import write_hold_reason
 
 
 class ClickUpWorkloadLimitError(RuntimeError):
@@ -156,7 +158,7 @@ class ClickUpClient:
             if _is_wan_hai_line(shipping_line) and self.settings.wan_hai_reference_hints_from_comments:
                 reference_hints = self._fetch_wan_hai_reference_hints(str(task.get("id") or ""))
             if not booking_no and not container_no:
-                if not reference_hints:
+                if not reference_hints and carrier_name(shipping_line) != 'ONE':
                     continue
 
             list_obj = task.get("list") if isinstance(task.get("list"), dict) else {}
@@ -423,6 +425,8 @@ class ClickUpClient:
             )
             return None
 
+        if payload.get("scope_fingerprint") != self._discovery_scope_fingerprint():
+            return None
         generated_at = payload.get("generated_at")
         lists = payload.get("lists")
         if not isinstance(generated_at, (int, float)) or not isinstance(lists, list):
@@ -440,12 +444,28 @@ class ClickUpClient:
             resolved[lid] = _name_or_none(item.get("name")) or ""
         return resolved
 
+    def _discovery_scope_fingerprint(self) -> str:
+        scope = {
+            "spaces": self.settings.clickup_space_ids,
+            "folders": self.settings.clickup_folder_ids,
+            "team": self.settings.clickup_team_id,
+            "discover_spaces": self.settings.clickup_discover_from_spaces,
+            "discover_team": self.settings.clickup_discover_from_team,
+            "include": self.settings.clickup_discovery_list_name_include,
+            "exclude": self.settings.clickup_discovery_list_name_exclude,
+            "validate_schema": self.settings.clickup_discovery_validate_schema,
+            "required_fields": [self.settings.cf_container_no, self.settings.cf_booking_no,
+                                self.settings.cf_shipping_line, self.settings.cf_status_last_checked],
+        }
+        return hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
+
     def _write_discovery_cache(self, lists: dict[str, str]) -> None:
         path_value = self.settings.clickup_discovery_cache_path
         if not path_value or self.settings.clickup_discovery_cache_ttl_seconds <= 0:
             return
         path = Path(path_value)
         payload = {
+            "scope_fingerprint": self._discovery_scope_fingerprint(),
             "generated_at": time.time(),
             "lists": [{"id": lid, "name": name} for lid, name in sorted(lists.items())],
         }
@@ -682,6 +702,13 @@ class ClickUpClient:
         return comments
 
     def plan_shipment_update(self, shipment: ShipmentRef, status: ShipmentStatus) -> ShipmentUpdatePlan:
+        if carrier_name(shipment.shipping_line) == "Maersk":
+            from .carriers.maersk import select_destination_arrival
+
+            # Partial feeds cannot establish destination from the last DISC.
+            status = replace(select_destination_arrival(status, shipment.destination_port),
+                             require_destination_evidence=True,
+                             destination_port=shipment.destination_port)
         if status.require_destination_evidence and shipment.destination_port:
             # A conflicting carrier POD must not override the shipment's destination.
             status = replace(status, destination_port=(
@@ -723,7 +750,8 @@ class ClickUpClient:
         )
         if container_update is not None:
             candidate_field_updates.append(container_update)
-        candidate_field_updates.extend(_build_direct_event_field_updates(status=status, settings=self.settings))
+        candidate_field_updates.extend(_build_direct_event_field_updates(
+            status=status, settings=self.settings, shipping_line=shipment.shipping_line))
         effective_field_values = _effective_field_values(
             shipment.current_field_values,
             candidate_field_updates,
@@ -806,6 +834,8 @@ class ClickUpClient:
                 comment_lines.append(f"Vessel/Voyage: {vessel_voyage_value}")
             if status.booking_status_text:
                 comment_lines.append(f"Booking status: {status.booking_status_text}")
+            if status.container_booking_map and status.movement_details:
+                comment_lines.append(status.movement_details)
             if recent_moves:
                 comment_lines.append(recent_moves_label)
                 for idx, move in enumerate(recent_moves, start=1):
@@ -854,6 +884,17 @@ class ClickUpClient:
             current_label = shipment.current_task_status or "unknown"
             comment_lines.append(f"Task status: {current_label} -> {task_status_update}")
 
+        if status.raw_source == 'https://apix.one-line.com/v2/events':
+            if status.origin_departure is not None:
+                departure = status.origin_departure
+                comment_lines.append('Origin departure: '
+                    + _format_port_local_time(departure.event_time_local_text, departure.event_time)
+                    + ' | ' + str(departure.location_code) + ' | ' + str(departure.event_state).upper())
+            if not _one_has_actual_departure(status, now_utc):
+                comment_lines.append('Departure NOT validated: no actual carrier departure was returned. '
+                    'Forecast ETD and booking confirmation do not authorize a departure notice. '
+                    'If the task is already in transit, the assignee must review its status before customer communication.')
+
         if not fields_changed and task_status_update and not self.settings.shipment_comment_on_no_change:
             comment_text = "\n".join(
                 [
@@ -885,9 +926,22 @@ class ClickUpClient:
         )
 
     def update_shipment_status(self, shipment: ShipmentRef, status: ShipmentStatus) -> ShipmentWriteResult:
-        plan = self.plan_shipment_update(shipment, status)
+        hold = write_hold_reason(shipment)
+        if hold:
+            raise ValueError(hold)
+        try:
+            plan = self.plan_shipment_update(shipment, status)
+        except Exception as exc:
+            # Preserve the original exception contract while identifying a read-only failure.
+            exc.shipment_sync_phase = 'projection'
+            raise
 
+        is_one = carrier_name(shipment.shipping_line) == 'ONE'
+        completion_updates = [update for update in plan.custom_field_updates
+                              if is_one and update.field_id == self.settings.cf_status_last_checked]
         for update in plan.custom_field_updates:
+            if update in completion_updates:
+                continue
             if update.field_type == "datetime":
                 self._set_date_custom_field(shipment.task_id, update.field_id, update.value, include_time=True)
             elif update.field_type == "date":
@@ -903,9 +957,17 @@ class ClickUpClient:
                     f"Task status update failed for {shipment.task_id}: {exc}",
                     file=sys.stderr,
                 )
+                try:
+                    self.report_tracking_failure(shipment, error='ClickUp task status update failed', phase='writeback')
+                except Exception as notice_exc:
+                    print(f'T&T failure comment not verified for task {shipment.task_id}: {type(notice_exc).__name__}', file=sys.stderr)
+                if is_one:
+                    raise
 
         if plan.comment_text:
             self._post_comment(shipment.task_id, plan.comment_text)
+        for update in completion_updates:
+            self._set_date_custom_field(shipment.task_id, update.field_id, update.value, include_time=True)
         return ShipmentWriteResult(
             changed=plan.changed,
             status_value=plan.status_value,
@@ -915,68 +977,147 @@ class ClickUpClient:
     def request_wan_hai_manual_capture(self, shipment: ShipmentRef, *, error: str | None = None) -> bool:
         if not self.settings.wan_hai_manual_capture_comment:
             return False
-        if self._recent_wan_hai_manual_capture_comment_exists(shipment.task_id):
-            return False
-        self._post_comment(shipment.task_id, _wan_hai_manual_capture_comment(shipment, self.settings, error=error))
-        return True
+        return self.report_tracking_failure(shipment, error=error or 'anti-bot access blocked',
+                                            method='automated/browser',
+                                            cooldown_hours=self.settings.wan_hai_manual_capture_comment_cooldown_hours)
 
     def report_msc_tracking_failure(self, shipment: ShipmentRef, *, reference: str, error: str) -> bool:
-        """Post a concise, idempotent carrier diagnostic without mutating shipment data."""
-        marker = "MSC Track & Trace exception"
+        return self.report_tracking_failure(shipment, error=error, reference=reference, method='browser capture/import')
+
+    def report_one_booking_conflict(self, shipment: ShipmentRef) -> bool:
+        if carrier_name(shipment.shipping_line) != 'ONE':
+            return False
+        return self.report_tracking_failure(shipment, error='ONE DCSA returned a conflicting booking')
+
+    def report_tracking_failure(self, shipment: ShipmentRef, *, error: str, phase: str = 'lookup',
+                                method: str = 'automated carrier adapter', reference: str | None = None,
+                                cooldown_hours: int = 24) -> bool:
+        if getattr(self, '_tracking_notice_delivery_failures', 0) >= 3:
+            return False
         try:
-            comments = self._fetch_recent_task_comments(shipment.task_id, limit=10)
-        except requests.RequestException as exc:
-            print(f"MSC failure comment cooldown check skipped for task {shipment.task_id}: {exc}", file=sys.stderr)
-            comments = []
-        normalized_reference = reference.strip().upper()
-        for raw in comments:
-            text = "\n".join(_comment_reference_texts(raw))
-            if marker in text and normalized_reference in text.upper():
-                return False
-        self._post_comment(
-            shipment.task_id,
-            "\n".join(
-                [
-                    marker,
-                    "",
-                    "MSC returned no usable tracking result during the normal public-browser review.",
-                    f"Reference checked: {reference}",
-                    f"Error: {error}",
-                    f"Carrier source: https://www.msc.com/en/track-a-shipment",
-                    "",
-                    "This failed reference did not change shipment fields, Last T&T Update, or workflow status.",
-                    "Action required: verify the booking/container reference with MSC or the booking party, then rerun Track & Trace.",
-                ]
-            ),
-        )
+            return self._report_tracking_failure(shipment, error=error, phase=phase,
+                method=method, reference=reference, cooldown_hours=cooldown_hours)
+        except Exception:
+            self._tracking_notice_delivery_failures = getattr(self, '_tracking_notice_delivery_failures', 0) + 1
+            if self._tracking_notice_delivery_failures == 3:
+                print('T&T failure comment delivery paused after three failures; consult run logs. Shipment processing continues.', file=sys.stderr)
+            raise
+
+    def _report_tracking_failure(self, shipment: ShipmentRef, *, error: str, phase: str,
+                                 method: str, reference: str | None, cooldown_hours: int) -> bool:
+        """Comment once per issue/day, mentioning fresh owners; never retry the POST."""
+        response = self._request("get", f"{self.base_url}/task/{shipment.task_id}", timeout=30)
+        response.raise_for_status()
+        task = response.json()
+        if task.get("id") != shipment.task_id:
+            raise ValueError("Tracking failure comment task identity mismatch")
+        def signature(value):
+            return json.dumps([value.get('custom_fields'), value.get('status'),
+                sorted(int(u['id']) for u in value.get('assignees') or [])], sort_keys=True)
+        task_signature = signature(task)
+        fields = _field_map(task.get("custom_fields") or [])
+        current_line = _field_text(fields.get(self.settings.cf_shipping_line))
+        if not current_line:
+            return False
+        if carrier_name(current_line) != carrier_name(shipment.shipping_line):
+            return False
+        if carrier_name(current_line) == 'Carrier' and current_line.lower() != shipment.shipping_line.lower():
+            return False
+        for field_id, expected in ((self.settings.cf_booking_no, shipment.booking_no),
+                                   (self.settings.cf_container_no, shipment.container_no)):
+            current = _field_text(fields.get(field_id))
+            if (current or "").strip().upper() != (expected or "").strip().upper():
+                return False  # A human has already changed the reference since this lookup.
+        if _expected_container_count(task.get('custom_fields')) != shipment.expected_container_count:
+            return False
+        current_destination = _shipment_destination(fields)
+        if (current_destination != shipment.destination_port
+                and not same_port(current_destination, shipment.destination_port)):
+            return False
+        if phase not in {'writeback', 'partial_browser_batch'} and self.settings.cf_status_last_checked:
+            current_checked = _parse_last_checked(fields.get(self.settings.cf_status_last_checked))
+            if current_checked is not None and (shipment.last_checked_at is None or current_checked > shipment.last_checked_at):
+                return False  # A later successful run supersedes this failed lookup.
+        status = task.get("status") or {}
+        if isinstance(status, dict):
+            status = status.get("status") or ""
+        if any(_normalize_workflow_status_name(status) == _normalize_workflow_status_name(value)
+               for value in self.settings.shipment_terminal_statuses):
+            return False
+        owners = sorted({int(user["id"]) for user in task.get("assignees") or []
+                         if isinstance(user, dict) and str(user.get("id", "")).isdigit()})
+        notice = classify_failure(shipment, error, phase=phase)
+        if (carrier_name(shipment.shipping_line) == 'Wan Hai' and notice.category == 'carrier_blocked'
+                and not self.settings.wan_hai_manual_capture_comment):
+            return False
+        fingerprint = hashlib.sha256(json.dumps(
+            [shipment.task_id, carrier_name(shipment.shipping_line), shipment.booking_no,
+             shipment.container_no, shipment.expected_container_count, notice.category,
+             (reference or '').strip().upper(), owners],
+            separators=(",", ":")).encode()).hexdigest()[:24]
+        marker = f"T&T failure notice [{fingerprint}]"
+        legacy_markers = ()
+        if carrier_name(shipment.shipping_line) == 'ONE' and notice.category == 'identity_conflict':
+            old_hash = hashlib.sha256(json.dumps([shipment.task_id, shipment.booking_no,
+                shipment.container_no, owners], separators=(',', ':')).encode()).hexdigest()[:24]
+            legacy_markers = (f'ONE T&T booking conflict [{old_hash}]',)
+        if self._recent_conflict_comment_exists(shipment.task_id, marker,
+                cooldown_hours=cooldown_hours, legacy_markers=legacy_markers):
+            return False
+        text = marker + '\n\n' + failure_comment(shipment, notice, method=method, phase=phase, reference=reference)
+        parts: list[dict[str, Any]] = [{"text": text + "\nOwners: "}]
+        if owners:
+            for owner in owners:
+                parts.extend([{"type": "tag", "user": {"id": owner}}, {"text": " "}])
+        else:
+            parts.append({"text": "No task assignee is set. Please assign an owner for this review."})
+        fresh = self._request('get', f'{self.base_url}/task/{shipment.task_id}', timeout=30)
+        fresh.raise_for_status()
+        latest = fresh.json()
+        if latest.get('id') != shipment.task_id or signature(latest) != task_signature:
+            return False
+        # Never automatically retry an ambiguous comment POST; the next run checks history first.
+        response = self.session.post(f"{self.base_url}/task/{shipment.task_id}/comment",
+                                     json={"comment": parts, "notify_all": False}, timeout=30)
+        response.raise_for_status()
+        if not response.json().get("id"):
+            raise ValueError("Tracking failure comment response has no comment identity")
         return True
 
-    def report_msc_container_review_issue(self, shipment: ShipmentRef, *, error: str) -> bool:
-        """Record a non-mutating multi-container MSC review problem once."""
-        marker = "MSC Track & Trace container review"
-        try:
-            comments = self._fetch_recent_task_comments(shipment.task_id, limit=10)
-        except requests.RequestException as exc:
-            print(f"MSC review comment cooldown check skipped for task {shipment.task_id}: {exc}", file=sys.stderr)
-            comments = []
-        if any(marker in "\n".join(_comment_reference_texts(raw)) for raw in comments):
+    def _recent_conflict_comment_exists(self, task_id: str, marker: str, *, cooldown_hours: int = 24,
+                                        legacy_markers: tuple[str, ...] = ()) -> bool:
+        if cooldown_hours <= 0:
             return False
-        self._post_comment(
-            shipment.task_id,
-            "\n".join(
-                [
-                    marker,
-                    "",
-                    "MSC results were reviewed per container but are incomplete or disagree on shipment-level tracking data.",
-                    f"Error: {error}",
-                    "Carrier source: https://www.msc.com/en/track-a-shipment",
-                    "",
-                    "No shipment fields, Last T&T Update, or workflow status were changed.",
-                    "Action required: verify every listed container with MSC, then rerun Track & Trace.",
-                ]
-            ),
-        )
-        return True
+        cooldown_seconds = cooldown_hours * 3600
+        now = datetime.now(timezone.utc)
+        params: dict[str, Any] = {}
+        seen = set()
+        for _ in range(10):
+            response = self._request("get", f"{self.base_url}/task/{task_id}/comment", params=params, timeout=30)
+            response.raise_for_status()
+            comments = response.json().get("comments")
+            if not isinstance(comments, list):
+                raise ValueError("Tracking failure comment history is unavailable")
+            for comment in comments:
+                created = _parse_datetime_value(comment.get("date"))
+                if created is None:
+                    raise ValueError("Tracking failure comment history has no timestamp")
+                text = '\n'.join(_comment_reference_texts(comment))
+                if ((now - created).total_seconds() <= cooldown_seconds
+                        and any(value in text for value in (marker, *legacy_markers))):
+                    return True
+            if len(comments) < 25 or all(
+                    (now - _parse_datetime_value(c["date"])).total_seconds() > cooldown_seconds for c in comments):
+                return False
+            cursor = (comments[-1].get("date"), comments[-1].get("id"))
+            if not all(cursor) or cursor in seen:
+                raise ValueError("Tracking failure comment history pagination is incomplete")
+            seen.add(cursor)
+            params = {"start": cursor[0], "start_id": cursor[1]}
+        raise ValueError("Tracking failure comment history exceeded the safety limit")
+
+    def report_msc_container_review_issue(self, shipment: ShipmentRef, *, error: str) -> bool:
+        return self.report_tracking_failure(shipment, error=error, method='browser capture/import')
 
     def _recent_wan_hai_manual_capture_comment_exists(self, task_id: str) -> bool:
         cooldown_hours = self.settings.wan_hai_manual_capture_comment_cooldown_hours
@@ -1057,7 +1198,8 @@ def _expected_container_count(custom_fields: Any) -> int | None:
     return None
 
 
-def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Settings) -> list[ShipmentFieldWrite]:
+def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Settings,
+                                      shipping_line: str = "") -> list[ShipmentFieldWrite]:
     updates: list[ShipmentFieldWrite] = []
 
     eta_value = _coerce_display_date(status.eta_local_text, status.eta_time)
@@ -1072,6 +1214,19 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
         )
 
     ordered_moves = _order_moves_ascending(status.recent_moves)
+    one_origin_forecast = status.raw_source == "https://apix.one-line.com/v2/events" or (
+        carrier_name(shipping_line) == "ONE" and status.booking_only
+        and status.raw_source == "https://ecomm.one-line.com/api/v1/edh/containers/track-and-trace/search")
+    if one_origin_forecast:
+        # ETD is a forecast; physical gates and workflow milestones remain actual-only.
+        departure = status.origin_departure
+        if settings.cf_etd and departure is not None:
+            value = _coerce_display_date(departure.event_time_local_text, departure.event_time)
+            if value is not None:
+                updates.append(ShipmentFieldWrite(settings.cf_etd, value, 'date', 'ETD'))
+    if status.raw_source == "https://apix.one-line.com/v2/events":
+        now_utc = datetime.now(timezone.utc)
+        ordered_moves = [m for m in ordered_moves if _move_is_effectively_actual(m, now_utc=now_utc)]
     if not ordered_moves:
         return updates
 
@@ -1093,6 +1248,15 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
             or _is_destination_discharge(status, move)
         ]
 
+    if status.raw_source == "https://apix.one-line.com/v2/events":
+        pre_discharge_moves = [move for move in pre_discharge_moves
+            if _event_code_from_move(move) not in {"GTIN", "GTOT"}
+            or (not _move_at_destination(status, move)
+                and move.equipment_load_state == {"GTIN": "LADEN", "GTOT": "EMPTY"}[_event_code_from_move(move)])]
+        post_discharge_moves = [move for move in post_discharge_moves
+            if _event_code_from_move(move) not in {"GTIN", "GTOT"}
+            or (move.equipment_load_state == {"GTIN": "EMPTY", "GTOT": "LADEN"}[_event_code_from_move(move)])]
+
     updates.extend(
         _build_move_field_updates(
             moves=pre_discharge_moves,
@@ -1102,8 +1266,14 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
             ],
         )
     )
-    etd_move = _pick_etd_move(pre_discharge_moves)
-    if settings.cf_etd and etd_move is not None:
+    etd_moves = pre_discharge_moves
+    if carrier_name(shipping_line) in {"Maersk", "ONE"}:
+        # Inland transport cannot establish ocean ETD or imply an origin barge.
+        etd_moves = [move for move in etd_moves
+                     if (move.transport_mode or "").strip().upper() not in {"TRUCK", "ROAD", "RAIL", "TRAIN"}]
+    etd_move = _pick_etd_move(etd_moves)
+    if (settings.cf_etd and etd_move is not None
+            and not (one_origin_forecast and status.origin_departure is not None)):
         etd_value = _coerce_display_date(etd_move.event_time_local_text, etd_move.event_time)
         if etd_value is not None:
             updates.append(
@@ -1364,6 +1534,34 @@ def _derive_operational_status_step(
     gate_in_empty_date = _field_date(settings.cf_gate_in_empty, field_values)
     discharge_date = _field_date(settings.cf_discharge_date, field_values)
 
+    if status.booking_only:
+        # Scheduled dates can confirm readiness, never collection or transit.
+        if (carrier_set and booking_set and etd_date is not None and eta_date is not None
+                and _carrier_booking_allows_confirmation(shipment, status)):
+            return "booking_confirmed"
+        return None
+
+    strict_one_origin = status.raw_source == "https://apix.one-line.com/v2/events"
+    actual_origin_codes = set()
+    if strict_one_origin:
+        actual_origin_codes = {
+            _event_code_from_move(move) for move in status.recent_moves
+            if _move_is_effectively_actual(move, now_utc=now_utc)
+            and (_event_code_from_move(move) != 'DEPA' or (
+                move.location_code and not _move_at_destination(status, move)
+                and (move.transport_mode or '').strip().upper() not in {'TRUCK', 'ROAD', 'RAIL', 'TRAIN'}))
+            and (_event_code_from_move(move) not in {"GTIN", "GTOT"}
+                or (not _move_at_destination(status, move)
+                    and move.equipment_load_state == {"GTIN": "LADEN", "GTOT": "EMPTY"}[_event_code_from_move(move)]))
+        }
+        # Persisted planned dates alone cannot prove a physical origin milestone.
+        if "GTOT" not in actual_origin_codes:
+            gate_out_empty_date = None
+        if "GTIN" not in actual_origin_codes:
+            gate_in_full_date = None
+        if "DEPA" not in actual_origin_codes:
+            etd_date = None
+
     target_step: str | None = None
 
     if (
@@ -1374,6 +1572,22 @@ def _derive_operational_status_step(
         and _carrier_booking_allows_confirmation(shipment, status)
     ):
         target_step = "booking_confirmed"
+
+    departure = status.origin_departure
+    # Actual origin gates prove terminal readiness, not sailing. A forecast
+    # that slips into the past must not strand the shipment at collection.
+    if (strict_one_origin and gate_out_empty_date is not None and gate_in_full_date is not None
+            and departure is not None and _event_code_from_move(departure) == "DEPA"
+            and _normalize_event_state(departure.event_state) == "estimated"
+            and _move_event_date(departure) is not None
+            and departure.location_code and departure.location_code != "AMBIGUOUS"
+            and not _move_at_destination(status, departure)
+            and (departure.transport_mode or "").strip().upper() not in {"TRUCK", "ROAD", "RAIL", "TRAIN"}
+            and any(_event_code_from_move(move) == "GTIN" and _move_is_actual(move)
+                    and move.equipment_load_state == "LADEN"
+                    and move.location_code == departure.location_code
+                    for move in status.recent_moves)):
+        target_step = _max_workflow_step(target_step, "origin_port")
 
     # A confirmed feeder-barge leg is operational transit. Carrier feeds do not
     # reliably expose the origin gate events for these moves, so do not block
@@ -1387,6 +1601,19 @@ def _derive_operational_status_step(
         current_step=current_step,
     ):
         target_step = _max_workflow_step(target_step, "in_transit")
+
+    if strict_one_origin and "DEPA" in actual_origin_codes and eta_date is not None and eta_date > today:
+        target_step = _max_workflow_step(target_step, "in_transit")
+        if 5 <= (eta_date - today).days <= 10:
+            target_step = _max_workflow_step(target_step, "arriving")
+
+    # Vessel movement proves transit even when the carrier omits origin gates.
+    if (carrier_name(shipment.shipping_line) == "Maersk"
+            and eta_date is not None and eta_date > today
+            and _has_actual_maersk_vessel_transit(status, now_utc=now_utc)):
+        target_step = _max_workflow_step(target_step, "in_transit")
+        if 5 <= (eta_date - today).days <= 10:
+            target_step = _max_workflow_step(target_step, "arriving")
 
     if gate_out_empty_date is not None and gate_in_full_date is None:
         target_step = _max_workflow_step(target_step, "collected")
@@ -1433,10 +1660,21 @@ def _derive_operational_status_step(
     if gate_in_empty_date is not None and gate_in_empty_date <= today and (
         target_step is not None and _workflow_step_order(target_step) >= _workflow_step_order("en_route_warehouse")
         or _workflow_step_order(current_step) >= _workflow_step_order("en_route_warehouse")
+        or _has_verified_one_empty_return(shipment, status, now_utc)
     ):
         target_step = _max_workflow_step(target_step, "empty_returned")
 
     return target_step
+
+
+def _one_has_actual_departure(status: ShipmentStatus, now_utc: datetime) -> bool:
+    return (not status.booking_only and any(
+        _event_code_from_move(move) == 'DEPA'
+        and _move_is_effectively_actual(move, now_utc=now_utc)
+        and move.location_code
+        and not _move_at_destination(status, move)
+        and (move.transport_mode or '').strip().upper() not in {'TRUCK', 'ROAD', 'RAIL', 'TRAIN'}
+        for move in status.recent_moves))
 
 
 def _effective_field_values(
@@ -1457,6 +1695,10 @@ def _effective_vessel_voyage(
     field_values: dict[str, Any],
     now_utc: datetime,
 ) -> str | None:
+    if status.raw_source == "https://apix.one-line.com/v2/events":
+        # ONE's vessel field is the final destination leg; intermediate legs
+        # remain on their own movements and cannot fill a missing final vessel.
+        return (status.final_vessel_voyage or "").strip() or None
     current_step = _workflow_step_for_status(
         _workflow_status_by_step(settings, shipment),
         shipment.current_task_status or "",
@@ -1472,7 +1714,11 @@ def _effective_vessel_voyage(
         return "BARGE"
 
     current_vessel_voyage = _field_string(settings.cf_vessel_voyage, field_values)
-    actual_event_vessel_voyage = _latest_actual_event_vessel_voyage(status, now_utc=now_utc)
+    actual_event_vessel_voyage = _latest_actual_event_vessel_voyage(
+        status, now_utc=now_utc,
+        include_discharge=(shipment.shipping_line or "").strip().lower()
+        in {"msc", "msc shipping line", "mediterranean shipping company"},
+    )
     # Do not replace an active feeder-leg marker with a planned final vessel.
     # It advances only when a later vessel-bearing event is actually reported.
     if current_vessel_voyage and current_vessel_voyage.upper() == "BARGE":
@@ -1492,13 +1738,24 @@ def _effective_vessel_voyage(
     return (status.vessel_voyage or "").strip() or None
 
 
-def _latest_actual_event_vessel_voyage(status: ShipmentStatus, *, now_utc: datetime) -> str | None:
+def _latest_actual_event_vessel_voyage(
+    status: ShipmentStatus, *, now_utc: datetime, include_discharge: bool = False
+) -> str | None:
+    codes = {"LOAD", "DEPA", "ARRI"} | ({"DISC"} if include_discharge else set())
     candidates = [
         move
         for move in status.recent_moves
-        if _event_code_from_move(move) in {"LOAD", "DEPA", "ARRI"}
+        if _event_code_from_move(move) in codes
         and (move.vessel_voyage or "").strip()
         and _move_is_effectively_actual(move, now_utc=now_utc)
+        and (not include_discharge or (
+            _move_is_actual(move)
+            and _move_event_date(move) is not None
+            and _move_event_date(move) <= now_utc.date()
+            and (move.event_time is None or move.event_time <= now_utc)
+            and (move.vessel_voyage or "").strip().upper()
+            not in {"EMPTY", "LADEN", "N/A", "N.A", "---"}
+        ))
     ]
     if not candidates:
         return None
@@ -1764,11 +2021,39 @@ def _validated_destination_discharge_index(status: ShipmentStatus, moves: list[M
 def _is_destination_discharge(status: ShipmentStatus, move: MovementEvent) -> bool:
     return (
         _event_code_from_move(move) == "DISC"
+        and (status.raw_source != "https://apix.one-line.com/v2/events" or move.equipment_load_state == "LADEN")
         and (move.event_state or "").strip().lower() == "actual"
         and move.event_time is not None
         and move.event_time.tzinfo is not None
         and move.event_time <= datetime.now(timezone.utc)
-        and same_port(status.destination_port, move.location)
+        and _move_at_destination(status, move)
+    )
+
+
+def _move_at_destination(status: ShipmentStatus, move: MovementEvent) -> bool:
+    # A carrier port code takes precedence over display labels; conflicting
+    # codes must not be rescued by a matching display name.
+    return same_port(status.destination_port, move.location_code or move.location)
+
+
+def _has_verified_one_empty_return(
+    shipment: ShipmentRef, status: ShipmentStatus, now_utc: datetime,
+) -> bool:
+    if shipment.shipping_line.strip().lower() != "one" or not status.require_destination_evidence:
+        return False
+    moves = _order_moves_ascending(status.recent_moves)
+    discharge_index = _validated_destination_discharge_index(status, moves)
+    if discharge_index is None:
+        return False
+    return any(
+        move.source_event_name == "Empty Container Returned from Customer"
+        and _event_code_from_move(move) == "GTIN"
+        and move.event_state == "actual"
+        and move.event_time is not None
+        and move.event_time.tzinfo is not None
+        and move.event_time <= now_utc
+        and _move_at_destination(status, move)
+        for move in moves[discharge_index + 1:]
     )
 
 
@@ -1813,12 +2098,19 @@ def _pick_etd_move(moves: list[MovementEvent]) -> MovementEvent | None:
     )
     if first_origin_ready_index is not None:
         origin_ready_move = moves[first_origin_ready_index]
-        later_moves = moves[first_origin_ready_index + 1 :]
+        # Only the first operational leg can establish origin ETD. Later
+        # transshipment loads must never become an origin-barge fallback.
+        first_departure_index = next(
+            (idx for idx in range(first_origin_ready_index + 1, len(moves))
+             if _event_code_from_move(moves[idx]) == "DEPA"),
+            len(moves) - 1,
+        )
+        later_moves = moves[first_origin_ready_index + 1 : first_departure_index + 1]
         same_port_departures = [
             move
             for move in later_moves
             if _event_code_from_move(move) == "DEPA"
-            and _locations_match(move.location, origin_ready_move.location)
+            and _etd_ports_match(move, origin_ready_move)
         ]
         if same_port_departures:
             return same_port_departures[0]
@@ -1846,10 +2138,17 @@ def _pick_etd_move(moves: list[MovementEvent]) -> MovementEvent | None:
 
 
 def _pick_origin_barge_load(moves: list[MovementEvent], origin_ready_index: int) -> MovementEvent | None:
-    candidate_indices = list(range(origin_ready_index, len(moves)))
+    first_departure_index = next(
+        (idx for idx in range(origin_ready_index + 1, len(moves))
+         if _event_code_from_move(moves[idx]) == "DEPA"),
+        len(moves),
+    )
+    candidate_indices = range(origin_ready_index, first_departure_index)
     for load_index in candidate_indices:
         load_move = moves[load_index]
         if _event_code_from_move(load_move) != "LOAD" or load_move.event_time is None:
+            continue
+        if load_index != origin_ready_index and not _etd_ports_match(load_move, moves[origin_ready_index]):
             continue
 
         later_departure_index = next(
@@ -1869,7 +2168,7 @@ def _pick_origin_barge_load(moves: list[MovementEvent], origin_ready_index: int)
                 for idx in range(load_index + 1, later_departure_index)
                 if _event_code_from_move(moves[idx]) == "DISC"
                 and moves[idx].event_time is not None
-                and not _locations_match(moves[idx].location, load_move.location)
+                and _etd_ports_differ(moves[idx], load_move)
             ),
             None,
         )
@@ -1881,10 +2180,46 @@ def _pick_origin_barge_load(moves: list[MovementEvent], origin_ready_index: int)
         # different location still identifies the feeder barge as the first
         # operational leg, and therefore as the ETD for pricing.
         departure_move = moves[later_departure_index]
-        if not _locations_match(departure_move.location, load_move.location):
+        if _etd_ports_differ(departure_move, load_move):
             return load_move
 
     return None
+
+
+def _etd_location_name(move: MovementEvent) -> str | None:
+    # ONE may truncate the terminal suffix, not the preceding city/country.
+    name = _location_key((move.location or "").split("(", 1)[0])
+    if not name or name in {"UNKNOWN", "N/A", "TBD"} or any(mark in name for mark in ("...", "/", ";", "|")):
+        return None
+    return name.rstrip(" ,")
+
+
+def _etd_location_code(move: MovementEvent) -> str | None:
+    code = _location_key(move.location_code)
+    return None if code in {None, "AMBIGUOUS", "UNKNOWN", "N/A", "TBD"} else code
+
+
+def _etd_ports_match(left: MovementEvent, right: MovementEvent) -> bool:
+    left_code, right_code = _etd_location_code(left), _etd_location_code(right)
+    if left_code and right_code:
+        if left_code == right_code:
+            return True
+        if all(re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}", code) for code in (left_code, right_code)):
+            return False
+    left_name, right_name = _etd_location_name(left), _etd_location_name(right)
+    return bool(left_name and right_name and
+                (left_name == right_name or same_port(left_name, right_name)))
+
+
+def _etd_ports_differ(left: MovementEvent, right: MovementEvent) -> bool:
+    left_code, right_code = _etd_location_code(left), _etd_location_code(right)
+    # Carrier facility codes may differ within one port. Only port-shaped
+    # codes or complete geographic names can establish a different port.
+    if left_code and right_code and all(re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}", code) for code in (left_code, right_code)):
+        return left_code != right_code
+    left_name, right_name = _etd_location_name(left), _etd_location_name(right)
+    return bool(left_name and right_name and "," in left_name and "," in right_name
+                and not _etd_ports_match(left, right))
 
 
 def _has_actual_barge_yard_load(moves: list[MovementEvent], *, now_utc: datetime) -> bool:
@@ -2041,6 +2376,21 @@ def _normalize_date_only(value: datetime) -> datetime:
 
 def _move_is_actual(move: MovementEvent) -> bool:
     return _normalize_event_state(move.event_state) == "actual"
+
+
+def _has_actual_maersk_vessel_transit(status: ShipmentStatus, *, now_utc: datetime) -> bool:
+    return any(
+        _event_code_from_move(move) in {"LOAD", "DEPA"}
+        and _normalize_event_state(move.event_state) == "actual"
+        and move.transport_mode == "VESSEL"
+        and move.event_occurrence_time is not None
+        and move.event_occurrence_time.tzinfo is not None
+        and move.event_occurrence_time <= now_utc
+        and move.location_code != "AMBIGUOUS"
+        and bool(move.location_code or move.location)
+        and not _move_at_destination(status, move)
+        for move in status.recent_moves
+    )
 
 
 def _move_is_effectively_actual(move: MovementEvent, *, now_utc: datetime) -> bool:
@@ -2437,5 +2787,10 @@ def _compute_snapshot_hash(
             latest_move.event_time if latest_move else None,
         ),
     }
+    if status.raw_source == 'https://apix.one-line.com/v2/events':
+        snapshot['origin_departure'] = (status.origin_departure.event_time_local_text
+                                        if status.origin_departure else None)
+        snapshot['origin_departure_state'] = (status.origin_departure.event_state
+                                              if status.origin_departure else None)
     raw = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

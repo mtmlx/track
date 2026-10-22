@@ -62,3 +62,24 @@ def test_preexisting_drift_stops_before_write(snapshots):
     c.state['a']['State'] = 'DISABLED'
     with pytest.raises(RuntimeError,match='changed during'):release.promote(c,before,after,lambda *_:None)
     assert c.state['b'] == before['b']
+
+
+def test_task_release_versions_maritime_scope_without_changing_credentials():
+    baseline = {'family':'track-trace-maersk', 'containerDefinitions':[{
+        'name':'worker', 'image':'old',
+        'environment':[{'name':'SHIPMENT_ALLOWED_LINES','value':'maersk'}],
+        'secrets':[{'name':'CLICKUP_DISCOVERY_LIST_NAME_INCLUDE','valueFrom':'old-config'},
+                   {'name':'CLICKUP_API_TOKEN','valueFrom':'keep-token'}],
+    }]}
+    before = copy.deepcopy(baseline)
+    shape = SimpleNamespace(members={'family':None,'containerDefinitions':None})
+    client = SimpleNamespace(meta=SimpleNamespace(service_model=SimpleNamespace(operation_model=lambda _:SimpleNamespace(input_shape=shape))))
+    result = release.task_request(client, baseline, 'new-digest')
+    container = result['containerDefinitions'][0]
+    assert container['image'] == 'new-digest'
+    assert container['environment'] == [
+        {'name':'SHIPMENT_ALLOWED_LINES','value':'maersk'},
+        {'name':'CLICKUP_DISCOVERY_LIST_NAME_INCLUDE','value':'shipment,maritimo'},
+    ]
+    assert container['secrets'] == [{'name':'CLICKUP_API_TOKEN','valueFrom':'keep-token'}]
+    assert baseline == before

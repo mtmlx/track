@@ -15,6 +15,7 @@ BUCKET = 'track-trace-artifacts-525753067477-us-east-2'
 CLUSTER = 'track-trace-prod'
 REPO = 'track-trace'
 CARRIERS = ('maersk', 'wan-hai', 'cma-cgm', 'msc', 'one')
+RUNTIME_CONFIG = {'CLICKUP_DISCOVERY_LIST_NAME_INCLUDE': 'shipment,maritimo'}
 ROOT = Path(__file__).resolve().parent
 EVIDENCE = Path('release-evidence')
 
@@ -41,6 +42,11 @@ def task_request(client, baseline, image, family=None):
     if len(result['containerDefinitions']) != 1:
         raise RuntimeError('Unexpected multi-container task: manual review required')
     result['containerDefinitions'][0]['image'] = image
+    container = result['containerDefinitions'][0]
+    # Version the reviewed non-secret scope with the release, not shared credentials.
+    container['environment'] = [v for v in container.get('environment', []) if v['name'] not in RUNTIME_CONFIG]
+    container['environment'] += [{'name':k, 'value':v} for k,v in RUNTIME_CONFIG.items()]
+    container['secrets'] = [v for v in container.get('secrets', []) if v['name'] not in RUNTIME_CONFIG]
     if family:
         result['family'] = family
     return result

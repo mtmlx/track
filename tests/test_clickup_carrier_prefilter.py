@@ -331,3 +331,68 @@ def test_discovered_lists_are_schema_validated_and_cached(tmp_path) -> None:
         "base-list": "",
         "valid-list": "Grupo Master shipments",
     }
+
+
+@pytest.mark.parametrize("name,allowed", [
+    ("Marítimos Rones de Guatemala", True),
+    ("Maritimos Polindustrias", True),
+    ("Grupo Master shipments", True),
+    ("Terrestres Rones de Guatemala", False),
+    ("Terrestres Polindustrias", False),
+    ("Facturas proveedores", False),
+    ("SKU's", False),
+])
+def test_maritime_discovery_names(name, allowed):
+    client = ClickUpClient(_settings(clickup_discovery_list_name_include=["shipment", "maritimo"]))
+    assert client._discovered_list_name_allowed(name) is allowed
+
+
+def test_maritime_discovery_preserves_exclusion_and_schema(monkeypatch):
+    client = ClickUpClient(_settings(
+        clickup_discovery_list_name_include=["shipment", "maritimo"],
+        clickup_discovery_list_name_exclude=["archivo"],
+        clickup_discovery_validate_schema=True,
+    ))
+    checked = []
+    def schema(list_id):
+        checked.append(list_id)
+        return list_id == "maritime"
+    monkeypatch.setattr(client, "_list_has_tracking_schema", schema)
+    assert client._filter_discovered_lists([
+        {"id":"maritime", "name":"Marítimos Rones de Guatemala"},
+        {"id":"incomplete", "name":"Marítimos without tracking fields"},
+        {"id":"archive", "name":"Marítimos archivo"},
+        {"id":"land", "name":"Terrestres Rones de Guatemala"},
+    ], scope="test") == {"maritime":"Marítimos Rones de Guatemala"}
+    assert checked == ["maritime", "incomplete"]
+
+
+def test_discovery_cache_invalidated_when_scope_expands(tmp_path):
+    path = tmp_path / "cache.json"
+    old = ClickUpClient(_settings(clickup_discovery_cache_path=str(path),
+        clickup_discovery_list_name_include=["shipment"]))
+    old._write_discovery_cache({"old":"Existing shipments"})
+    assert old._load_discovery_cache(allow_stale=False) == {"old":"Existing shipments"}
+    expanded = ClickUpClient(_settings(clickup_discovery_cache_path=str(path),
+        clickup_discovery_list_name_include=["shipment", "maritimo"]))
+    assert expanded._load_discovery_cache(allow_stale=False) is None
+    assert expanded._load_discovery_cache(allow_stale=True) is None
+
+
+def test_legacy_discovery_cache_cannot_hide_new_maritime_lists(tmp_path):
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({"generated_at": 9999999999, "lists":[{"id":"old", "name":"Existing shipments"}]}))
+    client = ClickUpClient(_settings(clickup_discovery_cache_path=str(path)))
+    assert client._load_discovery_cache(allow_stale=False) is None
+    assert client._load_discovery_cache(allow_stale=True) is None
+
+
+def test_environment_default_includes_maritime_lists(monkeypatch):
+    monkeypatch.delenv("CLICKUP_DISCOVERY_LIST_NAME_INCLUDE", raising=False)
+    for key, value in {
+        "CLICKUP_API_TOKEN":"test", "CLICKUP_LIST_ID":"test-list",
+        "CLICKUP_CF_CONTAINER_NO":"containers", "CLICKUP_CF_BOOKING_NO":"booking",
+        "CLICKUP_CF_SHIPPING_LINE":"carrier",
+    }.items():
+        monkeypatch.setenv(key, value)
+    assert Settings.from_env().clickup_discovery_list_name_include == ["shipment", "maritimo"]

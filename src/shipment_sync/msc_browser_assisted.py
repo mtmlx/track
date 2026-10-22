@@ -78,9 +78,12 @@ def write_queue(path: Path, items: Iterable[MscBrowserQueueItem]) -> None:
         "tracking_url": MSC_TRACKING_URL,
         "instructions": [
             "Open the normal MSC tracking page in an operator-controlled browser session.",
-            "Search each listed container first, then the booking only if MSC requires it.",
-            "Copy the complete visible tracking result into a local text file.",
+            "Search the shipment booking/BL first; container-only searches may return a reused container's next journey.",
+            "Copy each container's complete movements with the booking/BL header, Port of Discharge and Shipped To labels.",
+            "Do not import a capture without a matching booking/BL and a verified shipment destination.",
             "Use msc-browser-assisted --preview-capture before any ClickUp update.",
+            "Record every failed lookup in the import batch failures list with task_id, reference, and a concise error; never include credentials or silently omit a failed shipment.",
+            "An approved --apply import posts guarded failure comments with current-assignee mentions; preview mode posts no comments.",
             "Do not solve or bypass a CAPTCHA or access-control challenge programmatically.",
         ],
         "shipments": [asdict(item) for item in items],
@@ -226,6 +229,28 @@ def capture_reference(capture: MscBrowserCapture) -> str | None:
     return capture.reference or _first_container_reference(capture.capture)
 
 
+def validate_browser_journey(shipment: ShipmentRef, capture: MscBrowserCapture) -> None:
+    """Bind visible evidence to the current task before projecting any field."""
+    anchor = (shipment.booking_no or "").strip().upper()
+    if not anchor or not re.fullmatch(r"[A-Z0-9-]+", anchor):
+        raise ValueError("MSC journey review requires one unambiguous shipment booking/BL")
+    headers = re.findall(
+        r"^(?:BOOKING NUMBER|BILL OF LADING(?: NUMBER)?)\s*:\s*([A-Z0-9-]+)",
+        capture.capture, re.IGNORECASE | re.MULTILINE,
+    )
+    if anchor not in {value.upper() for value in headers}:
+        raise ValueError("MSC journey mismatch: visible booking/BL does not match the shipment; container-only evidence is insufficient")
+    lines = [line.strip() for line in capture.capture.splitlines() if line.strip()]
+    pod = _value_after_label(lines, "Port of Discharge")
+    delivered_to = _value_after_label(lines, "Shipped To")
+    if not any(same_port(shipment.destination_port, location) for location in (pod, delivered_to)):
+        raise ValueError("MSC journey mismatch: shipment destination is missing, ambiguous or differs from Port of Discharge/Shipped To")
+    # One capture must contain movements for exactly one container. A booking
+    # page with multiple expanded histories must be split without losing headers.
+    if len(_container_references(capture.capture)) != 1:
+        raise ValueError("MSC journey review requires one isolated container history per capture")
+
+
 def consolidate_browser_statuses(
     shipment: ShipmentRef,
     captures: Iterable[tuple[MscBrowserCapture, ShipmentStatus]],
@@ -263,6 +288,8 @@ def consolidate_browser_statuses(
             f"expected {shipment.expected_container_count} capture(s), received {len(entries)}"
         )
 
+    for capture, _ in entries:
+        validate_browser_journey(shipment, capture)
     statuses = [status for _, status in entries]
     if any(status.require_destination_evidence for status in statuses):
         destination = statuses[0].destination_port
@@ -345,6 +372,17 @@ def _capture_events(lines: list[str]) -> list[dict[str, str]]:
         }
         if vessel_voyage and not _looks_like_event_description(vessel_voyage) and not _DATE_RE.fullmatch(vessel_voyage):
             event["VesselVoyage"] = vessel_voyage
+            # The shared MSC event parser consumes separate vessel/voyage keys.
+            # EMPTY/LADEN describe equipment state, not a transport vessel.
+            if vessel_voyage.upper() not in {"EMPTY", "LADEN", "N.A", "N/A", "---"} and any(
+                marker in description.casefold()
+                for marker in ("loaded", "discharged", "arrival", "departure")
+            ):
+                vessel, voyage = _split_vessel_voyage(vessel_voyage)
+                if vessel:
+                    event["VesselName"] = vessel
+                if voyage:
+                    event["Voyage"] = voyage
         events.append(event)
     return events
 

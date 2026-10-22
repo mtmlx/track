@@ -41,6 +41,9 @@ class ShipmentStatus:
     booking_status_text: str | None = None
     destination_port: str | None = None
     require_destination_evidence: bool = False
+    booking_only: bool = False
+    container_booking_map: dict[str, str] = field(default_factory=dict)
+    origin_departure: "MovementEvent | None" = None
 
 
 @dataclass
@@ -51,6 +54,11 @@ class MovementEvent:
     event_time_local_text: str | None = None
     event_state: str | None = None
     vessel_voyage: str | None = None
+    source_event_name: str | None = None
+    location_code: str | None = None
+    equipment_load_state: str | None = None
+    transport_mode: str | None = None
+    event_occurrence_time: datetime | None = None
 
 
 @dataclass

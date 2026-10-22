@@ -1,7 +1,7 @@
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
@@ -25,6 +25,7 @@ from shipment_sync.carriers.common import (
     to_dcsa_movement_name,
 )
 from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
+from shipment_sync.destination import same_port
 from shipment_sync.playwright_runner import run_sync_playwright
 
 
@@ -107,7 +108,12 @@ class MaerskAdapter(CarrierAdapter):
         credentials = self._credentials_for(shipment)
         fallback_status: ShipmentStatus | None = None
         for reference, ref_type in candidates:
-            status = self._fetch_status_for_reference(reference, ref_type, credentials)
+            status = select_destination_arrival(
+                self._fetch_status_for_reference(reference, ref_type, credentials),
+                shipment.destination_port,
+            )
+            if self.eta_only_mode:
+                status.status_text = _eta_status_text(status.eta_time)
             if _status_has_carrier_data(status):
                 return status
             if fallback_status is None:
@@ -598,10 +604,17 @@ def _public_status_events(status: ShipmentStatus) -> list[dict[str, str]]:
         if move.event_time is None:
             continue
         event: dict[str, str] = {
-            "eventDateTime": move.event_time.isoformat(),
+            "eventDateTime": move.event_time_local_text or move.event_time.isoformat(),
             "locationName": move.location or "",
-            "estimatedArrivalDateTime": status.eta_time.isoformat() if status.eta_time else "",
         }
+        if move.event_state:
+            event["eventClassifierCode"] = move.event_state
+        if move.transport_mode:
+            event["modeOfTransport"] = move.transport_mode
+        if move.location_code:
+            event["UNLocationCode"] = move.location_code
+        if move.vessel_voyage:
+            event["vesselVoyage"] = move.vessel_voyage
         if "(DEPA)" in move.name:
             event["eventType"] = "TRANSPORT"
             event["transportEventTypeCode"] = "DEPA"
@@ -807,10 +820,10 @@ def _extract_next_cursor(payload: object, *, cursor: str, page_size: int, count:
     return None
 
 
-def _status_from_events(events: list[dict], source: str, *, source_url: str | None) -> ShipmentStatus:
+def _status_from_events(events: list[dict], source: str, *, source_url: str | None,
+                        destination_port: str | None = None) -> ShipmentStatus:
     ordered = sorted(events, key=_event_sort_key, reverse=True)
     latest = ordered[0]
-    final_arrival = _latest_estimated_transport_arrival(events)
     latest_move = _event_to_movement(latest)
     status_text = latest_move.name if latest_move and latest_move.name else "Unknown"
     location = extract_first(
@@ -831,23 +844,18 @@ def _status_from_events(events: list[dict], source: str, *, source_url: str | No
     detail_parts = [x for x in [event_type, classifier, movement_code] if x]
     movement_details = " / ".join(detail_parts) if detail_parts else None
     recent_moves = [_event_to_movement(event) for event in ordered]
-    final_vessel_voyage = extract_event_vessel_voyage(final_arrival) if final_arrival else None
-    vessel_voyage = final_vessel_voyage or extract_final_destination_vessel_voyage(events)
-    eta_raw = _event_datetime_text(final_arrival) if final_arrival else _extract_eta_raw(latest)
-    return ShipmentStatus(
+    vessel_voyage = extract_final_destination_vessel_voyage(events)
+    return select_destination_arrival(ShipmentStatus(
         status_text=status_text,
         location=location,
         event_time=event_time,
-        eta_time=parse_event_time(eta_raw) or extract_eta_time(latest),
-        eta_local_text=eta_raw,
         latest_move=latest_move,
         recent_moves=recent_moves,
         raw_source=raw_source,
         source_url=source_url,
         movement_details=movement_details,
         vessel_voyage=vessel_voyage,
-        final_vessel_voyage=final_vessel_voyage,
-    )
+    ), destination_port)
 
 
 def _event_sort_key(event: dict) -> tuple[int, str]:
@@ -885,6 +893,13 @@ def _event_to_movement(event: dict) -> MovementEvent:
         or extract_first(event, ["timestamp"])
     )
     classifier = _event_classifier(event)
+    location_code = _event_location_code(event)
+    transport_call = event.get("transportCall")
+    mode_sources = [event, transport_call] if isinstance(transport_call, dict) else [event]
+    modes = {
+        str(source["modeOfTransport"]).strip().upper()
+        for source in mode_sources if source.get("modeOfTransport")
+    }
     return MovementEvent(
         name=name,
         location=location,
@@ -892,20 +907,55 @@ def _event_to_movement(event: dict) -> MovementEvent:
         event_time_local_text=local_time_text,
         event_state=_normalize_event_state(classifier),
         vessel_voyage=extract_event_vessel_voyage(event),
+        location_code=location_code,
+        transport_mode=next(iter(modes)) if len(modes) == 1 else ("AMBIGUOUS" if modes else None),
+        event_occurrence_time=parse_event_time(event.get("eventDateTime")),
     )
 
 
-def _latest_estimated_transport_arrival(events: list[dict]) -> dict | None:
-    candidates = [
-        event
-        for event in events
-        if _event_classifier(event) == "estimated"
-        and _normalized_event_code(event.get("transportEventTypeCode")) == "ARRI"
-        and parse_event_time(_event_datetime_text(event)) is not None
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda event: parse_event_time(_event_datetime_text(event)).isoformat())
+def _event_location_code(event: dict) -> str | None:
+    # Use event locations, never arbitrary nested itinerary/vessel locations.
+    locations = [event, event.get("eventLocation")]
+    transport_call = event.get("transportCall")
+    if isinstance(transport_call, dict):
+        locations.extend([transport_call, transport_call.get("location")])
+    codes = {
+        str(location[key]).strip().upper()
+        for location in locations if isinstance(location, dict)
+        for key in ("UNLocationCode", "unLocationCode")
+        if location.get(key)
+    }
+    if len(codes) > 1:
+        return "AMBIGUOUS"
+    return next(iter(codes), None)
+
+
+def select_destination_arrival(status: ShipmentStatus, destination_port: str | None) -> ShipmentStatus:
+    """Never promote an inland/transshipment arrival or a past estimate to POD actual."""
+    now = datetime.now(timezone.utc)
+    candidates = []
+    for move in status.recent_moves:
+        mode = (move.transport_mode or "").strip().upper()
+        if (not move.name or "(ARRI)" not in move.name
+                or not same_port(destination_port, move.location_code or move.location)
+                or mode not in {"", "VESSEL", "BARGE"}
+                or (not mode and not move.vessel_voyage)
+                or move.event_time is None or move.event_time.tzinfo is None):
+            continue
+        if (status.raw_source or "").startswith("maersk-events-api:") and move.event_occurrence_time is None:
+            continue
+        state = _normalize_event_state(move.event_state)
+        if state == "actual" and move.event_time <= now:
+            candidates.append((1, move.event_time, move))
+        elif state == "estimated":
+            candidates.append((0, move.event_time, move))
+    arrival = max(candidates, key=lambda item: item[:2])[2] if candidates else None
+    return replace(
+        status,
+        eta_time=arrival.event_time if arrival else None,
+        eta_local_text=arrival.event_time_local_text if arrival else None,
+        final_vessel_voyage=arrival.vessel_voyage if arrival else None,
+    )
 
 
 def _event_classifier(event: dict) -> str | None:
