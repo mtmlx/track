@@ -11,6 +11,9 @@ def _normalize(value: str) -> str:
 
 
 _ALIASES = {
+    "egaly": "alexandria eg",
+    "alexandria egypt": "alexandria eg",
+    "alexandria egipto": "alexandria eg",
     "veracruz mexico": "veracruz mx",
     "uschs": "charleston us",
     "charleston": "charleston us",

@@ -30,7 +30,12 @@ class _OAuthSession:
 
     def get(self, url: str, **kwargs: object) -> requests.Response:
         self.get_calls.append({"url": url, **kwargs})
-        return _response([])
+        return _response([{
+            "equipmentReference": "TGHU1371739", "eventType": "EQUIPMENT",
+            "eventClassifierCode": "ACT", "equipmentEventTypeCode": "LOAD",
+            "eventDateTime": "2026-01-01T09:00:00Z",
+            "eventLocation": {"UNLocationCode": "CNSHA"},
+        }])
 
 
 def _configure_cma_api(monkeypatch: pytest.MonkeyPatch) -> None:
