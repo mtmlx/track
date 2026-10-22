@@ -166,6 +166,47 @@ def test_33572_updates_forecast_etd_but_keeps_collection_not_transit(monkeypatch
     assert 'Departure NOT validated' in plan.comment_text
 
 
+@pytest.mark.parametrize('forecast_days', [-3, 0, 6])
+def test_33572_actual_laden_origin_gate_advances_to_origin_not_transit(monkeypatch, forecast_days):
+    rows = forecast_rows()
+    rows.append(event('full', 'GTIN', 'CNSHA', days=-1, empty='LADEN'))
+    rows[2] = sailing_event('forecast', 'DEPA', 'CNSHA', '2642E', classifier='EST', days=forecast_days, vessel='RDO ACE')
+    s = shipment(current_task_status='Recolectado')
+    status = client(monkeypatch, [(rows, {})]).fetch_status(s)
+    plan = writer().plan_shipment_update(s, status)
+    assert plan.task_status_update == 'En puerto Origen'
+    assert 'Departure NOT validated' in plan.comment_text
+    assert next(u.value for u in plan.custom_field_updates if u.label == 'Gate-in full').date().isoformat() == rows[-1]['eventDateTime'][:10]
+    saved = {u.field_id: int(u.value.timestamp()*1000) if isinstance(u.value,datetime) else u.value
+             for u in plan.custom_field_updates}
+    again = writer().plan_shipment_update(replace(s,current_task_status='En puerto Origen',current_field_values=saved), status)
+    assert again.task_status_update is None and not again.changed
+
+
+@pytest.mark.parametrize('change', ['estimated_gate','empty_gate','other_port','missing_pickup','inland_departure','missing_origin'])
+def test_origin_readiness_rejects_unproven_or_unrelated_gates(monkeypatch, change):
+    rows = forecast_rows()
+    full = event('full', 'GTIN', 'CNSHA', days=-1, empty='LADEN')
+    rows.append(full)
+    if change == 'estimated_gate': full['eventClassifierCode'] = 'EST'
+    elif change == 'empty_gate': full['emptyIndicatorCode'] = 'EMPTY'
+    elif change == 'other_port': full['eventLocation']['UNLocationCode'] = 'KRPUS'
+    elif change == 'missing_pickup': rows.pop(0)
+    elif change == 'inland_departure': rows[2]['transportCall']['modeOfTransport'] = 'TRUCK'
+    elif change == 'missing_origin': rows.pop(2)
+    status = client(monkeypatch, [(rows, {})]).fetch_status(shipment(current_task_status='Recolectado'))
+    plan = writer().plan_shipment_update(shipment(current_task_status='Recolectado'), status)
+    assert plan.task_status_update not in {'En puerto Origen','Tránsito','Por arribar'}
+
+
+def test_full_origin_gates_still_require_actual_ocean_departure_for_transit(monkeypatch):
+    rows = forecast_rows() + [event('full', 'GTIN', 'CNSHA', days=-2, empty='LADEN')]
+    rows[2] = sailing_event('actual', 'DEPA', 'CNSHA', '2642E', days=-1, vessel='RDO ACE')
+    rows[2]['transportCall']['modeOfTransport'] = 'VESSEL'
+    status = client(monkeypatch, [(rows, {})]).fetch_status(shipment(current_task_status='En puerto Origen'))
+    assert writer().plan_shipment_update(shipment(current_task_status='En puerto Origen'), status).task_status_update == 'Tránsito'
+
+
 def test_33793_preview_corrects_schedule_without_automatic_status_rollback(monkeypatch):
     rows = forecast_rows()
     s = shipment(current_task_status='Tránsito')
