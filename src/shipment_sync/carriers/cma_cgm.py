@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import os
 import re
@@ -25,6 +25,7 @@ from shipment_sync.carriers.common import (
     to_dcsa_movement_name,
 )
 from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
+from shipment_sync.destination import same_port
 from shipment_sync.playwright_runner import configured_browser_channel, run_sync_playwright
 
 
@@ -125,6 +126,8 @@ class CmaCgmAdapter(CarrierAdapter):
         )
 
     def fetch_status(self, shipment: ShipmentRef) -> ShipmentStatus:
+        if self._api_mode_requested() and shipment.container_no:
+            return self._fetch_container_statuses(shipment)
         reference, ref_type = _pick_reference(
             shipment=shipment,
             booking_code=self.booking_type_code,
@@ -158,6 +161,22 @@ class CmaCgmAdapter(CarrierAdapter):
             source_url=source_url,
             playwright_error=playwright_error,
         )
+
+    def _fetch_container_statuses(self, shipment: ShipmentRef) -> ShipmentStatus:
+        references = _container_references(shipment.container_no)
+        if shipment.expected_container_count and len(references) != shipment.expected_container_count:
+            raise ValueError("CMA container list does not match the shipment's expected container count")
+        statuses = []
+        for reference in references:
+            fetched = self._fetch_dcsa_event_pages(replace(shipment, container_no=reference))
+            status = self._status_from_payload(
+                payload={"events": list(fetched.events)}, source=f"cma-api:{fetched.source_url}",
+                source_url=_build_source_url(self.url_template, reference, self.container_type_code),
+            )
+            if set(status.discovered_containers) != {reference} or not status.recent_moves:
+                raise ValueError(f"CMA returned missing or conflicting container evidence for {reference}")
+            statuses.append(_bind_destination(status, shipment.destination_port))
+        return _consolidate_containers(shipment, references, statuses)
 
     def fetch_dcsa_events(self, shipment: ShipmentRef) -> tuple[list[dict[str, Any]], str]:
         """Fetch CMA's official DCSA event payload without website fallback.
@@ -680,10 +699,77 @@ def _bounded_env_int(key: str, *, default: int, maximum: int) -> int:
 
 def _pick_reference(shipment: ShipmentRef, booking_code: str, container_code: str) -> tuple[str, str]:
     if shipment.container_no:
-        return _normalize_reference(shipment.container_no), container_code
+        return _container_references(shipment.container_no)[0], container_code
     if shipment.booking_no:
         return _normalize_reference(shipment.booking_no), booking_code
     raise ValueError("Missing booking/container number")
+
+
+def _container_references(value: str) -> list[str]:
+    references = []
+    for token in re.split(r"[,;\s]+", value.strip()):
+        if not token:
+            continue
+        reference = token.replace("-", "").upper()
+        if not re.fullmatch(r"[A-Z]{4}\d{7}", reference):
+            raise ValueError("CMA requires complete ISO container references; do not guess an invalid reference")
+        if reference not in references:
+            references.append(reference)
+    if not references:
+        raise ValueError("CMA requires at least one valid container reference")
+    return references
+
+
+def _bind_destination(status: ShipmentStatus, destination: str | None) -> ShipmentStatus:
+    now = datetime.now(timezone.utc)
+    arrivals = [m for m in status.recent_moves if m.name.endswith("(ARRI)")
+                and same_port(destination, m.location_code or m.location)
+                and m.event_time is not None and m.vessel_voyage
+                and (m.transport_mode or "VESSEL") in {"VESSEL", "BARGE"}
+                and (m.event_state == "estimated" or
+                     (m.event_state == "actual" and m.event_time <= now))]
+    arrival = max(arrivals, key=lambda m: (m.event_state == "actual", m.event_time)) if arrivals else None
+    return replace(status, destination_port=destination, require_destination_evidence=True,
+                   eta_time=arrival.event_time if arrival else None,
+                   eta_local_text=arrival.event_time_local_text if arrival else None,
+                   vessel_voyage=arrival.vessel_voyage if arrival else None,
+                   final_vessel_voyage=arrival.vessel_voyage if arrival else None)
+
+
+def _consolidate_containers(shipment: ShipmentRef, references: list[str], statuses: list[ShipmentStatus]) -> ShipmentStatus:
+    # A physical shipment milestone requires matching evidence for every unit.
+    indexed = []
+    for status in statuses:
+        by_key = {}
+        for move in status.recent_moves:
+            if not move.event_time or not move.location_code or move.location_code == "AMBIGUOUS":
+                continue
+            key = (move.name, move.location_code, move.event_state, move.equipment_load_state, move.transport_mode)
+            if key not in by_key or move.event_time > by_key[key].event_time:
+                by_key[key] = move
+        indexed.append(by_key)
+    common = set(indexed[0]).intersection(*(set(i) for i in indexed[1:]))
+    moves = []
+    for key in common:
+        evidence = [index[key] for index in indexed]
+        last = max(evidence, key=lambda m: m.event_time)
+        vessels = {m.vessel_voyage for m in evidence}
+        moves.append(replace(last, vessel_voyage=last.vessel_voyage if len(vessels) == 1 else None))
+    moves.sort(key=lambda m: m.event_time, reverse=True)
+    if not moves:
+        raise ValueError("CMA returned no shared port-validated movement evidence for all containers")
+    actual = [m for m in moves if m.event_state == "actual" and m.event_time <= datetime.now(timezone.utc)]
+    latest = actual[0] if actual else None
+    eta = max(statuses, key=lambda s: s.eta_time) if all(s.eta_time for s in statuses) else None
+    vessels = {s.final_vessel_voyage for s in statuses}
+    vessel = next(iter(vessels)) if len(vessels) == 1 else None
+    return replace(statuses[0], status_text=latest.name if latest else "Awaiting actual CMA event for every container",
+                   latest_move=latest, location=latest.location if latest else None,
+                   event_time=latest.event_time if latest else None, recent_moves=moves,
+                   discovered_containers=references, container_discovery_authoritative=False,
+                   eta_time=eta.eta_time if eta else None, eta_local_text=eta.eta_local_text if eta else None,
+                   vessel_voyage=vessel, final_vessel_voyage=vessel,
+                   movement_details=f"Validated CMA evidence for all {len(references)} shipment containers")
 
 
 def _normalize_reference(reference: str) -> str:
@@ -927,7 +1013,7 @@ def _extract_moves(payload: dict[str, Any]) -> list[MovementEvent]:
     for event in events:
         if not isinstance(event, dict):
             continue
-        local_time_text = extract_first(
+        local_time_text = event.get("eventDateTime") or extract_first(
             event,
             [
                 "eventLocalPortDate",
@@ -940,7 +1026,13 @@ def _extract_moves(payload: dict[str, Any]) -> list[MovementEvent]:
                 "date",
             ],
         )
-        state_hint = extract_event_state_hint(event)
+        state_hint = event.get("eventClassifierCode") or extract_event_state_hint(event)
+        call = event.get("transportCall") if isinstance(event.get("transportCall"), dict) else {}
+        event_location = event.get("eventLocation") if isinstance(event.get("eventLocation"), dict) else {}
+        call_location = call.get("location") if isinstance(call.get("location"), dict) else {}
+        codes = {str(location["UNLocationCode"]).strip().upper()
+                 for location in (event_location, call, call_location) if location.get("UNLocationCode")}
+        location_code = next(iter(codes)) if len(codes) == 1 else ("AMBIGUOUS" if codes else None)
         move_name = _extract_move_name(event)
         moves.append(
             MovementEvent(
@@ -953,6 +1045,10 @@ def _extract_moves(payload: dict[str, Any]) -> list[MovementEvent]:
                 event_time_local_text=local_time_text,
                 event_state=_normalize_event_state(state_hint),
                 vessel_voyage=extract_event_vessel_voyage(event),
+                location_code=location_code,
+                equipment_load_state=str(event.get("emptyIndicatorCode") or "").strip().upper() or None,
+                transport_mode=str(call.get("modeOfTransport") or "").strip().upper() or None,
+                event_occurrence_time=parse_event_time(local_time_text),
             )
         )
 
@@ -1091,7 +1187,7 @@ def _normalize_event_state(value: str | None) -> str | None:
         return None
     if normalized in {"actual", "act", "completed", "complete", "confirmed", "a"}:
         return "actual"
-    if normalized in {"estimated", "estimate", "est", "planned", "plan", "forecast", "expected", "scheduled", "e"}:
+    if normalized in {"estimated", "estimate", "est", "planned", "plan", "pln", "forecast", "expected", "scheduled", "e"}:
         return "estimated"
     return normalized
 
