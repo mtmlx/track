@@ -8,7 +8,7 @@ import re
 from typing import Iterable
 
 from shipment_sync.carriers.msc import _status_from_payload
-from shipment_sync.destination import same_port
+from shipment_sync.destination import same_delivery_place, same_port
 from shipment_sync.models import ShipmentRef, ShipmentStatus
 
 
@@ -27,6 +27,7 @@ class MscBrowserQueueItem:
     container_numbers: list[str]
     expected_container_count: int | None
     tracking_url: str
+    master_bl_no: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ def build_queue(shipments: Iterable[ShipmentRef]) -> list[MscBrowserQueueItem]:
                 container_numbers=references,
                 expected_container_count=shipment.expected_container_count,
                 tracking_url=MSC_TRACKING_URL,
+                master_bl_no=shipment.master_bl_no,
             )
         )
     return items
@@ -81,6 +83,7 @@ def write_queue(path: Path, items: Iterable[MscBrowserQueueItem]) -> None:
             "Search the shipment booking/BL first; container-only searches may return a reused container's next journey.",
             "Copy each container's complete movements with the booking/BL header, Port of Discharge and Shipped To labels.",
             "Do not import a capture without a matching booking/BL and a verified shipment destination.",
+            "If booking results omit a unit, query the task's recorded Master B/L and every recorded container. A B/L fallback requires the exact saved Master B/L, complete container allocation/quantity and consistent POD/delivery. Never replace or stitch carrier identity headers.",
             "Use msc-browser-assisted --preview-capture before any ClickUp update.",
             "Record every failed lookup in the import batch failures list with task_id, reference, and a concise error; never include credentials or silently omit a failed shipment.",
             "An approved --apply import posts guarded failure comments with current-assignee mentions; preview mode posts no comments.",
@@ -181,6 +184,20 @@ def status_from_browser_capture(text: str) -> ShipmentStatus:
     )
     status.discovered_containers = containers
     status.destination_port = _value_after_label(lines, "Port of Discharge")
+    status.place_of_delivery = _value_after_label(lines, "Shipped To")
+    now = datetime.now(timezone.utc)
+    arrivals = [move for move in status.recent_moves
+        if move.name.endswith("(ARRI)") and move.vessel_voyage
+        and move.transport_mode not in {"RAIL", "TRUCK", "ROAD", "TRAIN"}
+        and same_port(status.destination_port, move.location)
+        and move.event_time is not None
+        and (move.event_state == "estimated" or move.event_state == "actual" and move.event_time <= now)]
+    arrival = max(arrivals, key=lambda move: (move.event_state == "actual", move.event_time)) if arrivals else None
+    if not eta or arrival and arrival.event_state == "actual":
+        # A rail-ramp arrival or ocean discharge must not replace ocean arrival.
+        status.eta_time = arrival.event_time if arrival else None
+        status.eta_local_text = arrival.event_time_local_text if arrival else None
+        status.status_text = f"ETA {status.eta_time.isoformat()}" if status.eta_time else "ETA unavailable"
     status.require_destination_evidence = True
     # A visible page is reliable for movement facts but not a blanket authority
     # to replace a manually corrected container list.
@@ -232,23 +249,45 @@ def capture_reference(capture: MscBrowserCapture) -> str | None:
 def validate_browser_journey(shipment: ShipmentRef, capture: MscBrowserCapture) -> None:
     """Bind visible evidence to the current task before projecting any field."""
     anchor = (shipment.booking_no or "").strip().upper()
-    if not anchor or not re.fullmatch(r"[A-Z0-9-]+", anchor):
+    master_bl = (shipment.master_bl_no or "").strip().upper()
+    if any(value and not re.fullmatch(r"[A-Z0-9-]{3,50}", value) for value in (anchor, master_bl)):
         raise ValueError("MSC journey review requires one unambiguous shipment booking/BL")
-    headers = re.findall(
-        r"^(?:BOOKING NUMBER|BILL OF LADING(?: NUMBER)?)\s*:\s*([A-Z0-9-]+)",
+    booking_headers = set(re.findall(
+        r"^BOOKING NUMBER[ \t]*:[ \t]*([A-Z0-9-]+)",
         capture.capture, re.IGNORECASE | re.MULTILINE,
-    )
-    if anchor not in {value.upper() for value in headers}:
+    ))
+    booking_headers = {value.upper() for value in booking_headers}
+    bl_headers = _visible_master_bls(capture.capture)
+    if booking_headers and booking_headers != {anchor}:
+        raise ValueError("MSC journey mismatch: visible booking/BL does not match the shipment; container-only evidence is insufficient")
+    if master_bl and bl_headers != {master_bl}:
+        raise ValueError("MSC B/L identity conflict: the visible Master B/L is missing, ambiguous or does not match the recorded Master B/L")
+    if not booking_headers:
+        # B/L-only pages can rescue incomplete booking results, never unbound
+        # container histories or an unconfirmed/discovered container allocation.
+        if not (master_bl and bl_headers == {master_bl} and _container_references(shipment.container_no)
+                and shipment.expected_container_count is not None):
+            if not (anchor and bl_headers == {anchor}):
+                raise ValueError("MSC journey mismatch: visible booking/BL does not match the shipment; container-only evidence is insufficient")
+    if not anchor and not master_bl:
         raise ValueError("MSC journey mismatch: visible booking/BL does not match the shipment; container-only evidence is insufficient")
     lines = [line.strip() for line in capture.capture.splitlines() if line.strip()]
     pod = _value_after_label(lines, "Port of Discharge")
     delivered_to = _value_after_label(lines, "Shipped To")
-    if not any(same_port(shipment.destination_port, location) for location in (pod, delivered_to)):
+    if not (same_port(shipment.destination_port, pod)
+            or same_delivery_place(shipment.destination_port, delivered_to)):
         raise ValueError("MSC journey mismatch: shipment destination is missing, ambiguous or differs from Port of Discharge/Shipped To")
     # One capture must contain movements for exactly one container. A booking
     # page with multiple expanded histories must be split without losing headers.
     if len(_container_references(capture.capture)) != 1:
         raise ValueError("MSC journey review requires one isolated container history per capture")
+
+
+def _visible_master_bls(text: str) -> set[str]:
+    return {value.upper() for value in re.findall(
+        r"^BILL OF LADING(?: NUMBER)?[ \t]*:[ \t]*(?:\r?\n[ \t]*)?([A-Z0-9-]+)",
+        text, re.IGNORECASE | re.MULTILINE,
+    )}
 
 
 def consolidate_browser_statuses(
@@ -262,6 +301,12 @@ def consolidate_browser_statuses(
 
     expected_references = _container_references(shipment.container_no)
     expected_set = set(expected_references)
+    if (shipment.expected_container_count is not None and expected_set
+            and len(expected_set) != shipment.expected_container_count):
+        raise ValueError(f"MSC container count conflict: recorded {len(expected_set)} unique containers; expected {shipment.expected_container_count}. Reconcile the exact Master B/L allocation; no automatic removal is permitted")
+    bl_sets = {_canonical_text(bl) for capture, _ in entries for bl in _visible_master_bls(capture.capture)}
+    if len(bl_sets) > 1:
+        raise ValueError("MSC B/L identity conflict: captures contain different Master B/L allocations")
     reviewed_references: set[str] = set()
     for capture, status in entries:
         reference = capture_reference(capture)
@@ -282,7 +327,7 @@ def consolidate_browser_statuses(
             if unexpected:
                 details.append(f"unexpected container capture(s): {', '.join(unexpected)}")
             raise ValueError("MSC browser review is incomplete: " + "; ".join(details))
-    elif shipment.expected_container_count is not None and len(entries) < shipment.expected_container_count:
+    elif shipment.expected_container_count is not None and len(entries) != shipment.expected_container_count:
         raise ValueError(
             "MSC browser review is incomplete: "
             f"expected {shipment.expected_container_count} capture(s), received {len(entries)}"
@@ -295,6 +340,11 @@ def consolidate_browser_statuses(
         destination = statuses[0].destination_port
         if not all(same_port(destination, status.destination_port) for status in statuses):
             raise ValueError("MSC destination port is missing or disagrees across containers")
+        delivery = statuses[0].place_of_delivery
+        if any(status.place_of_delivery for status in statuses) and not all(
+            same_delivery_place(delivery, status.place_of_delivery) for status in statuses
+        ):
+            raise ValueError("MSC place of delivery is missing or disagrees across containers")
     eta_values = {_canonical_datetime(status.eta_time) for status in statuses}
     vessel_values = {_canonical_text(status.vessel_voyage) for status in statuses}
     if len(eta_values) > 1 or len(vessel_values) > 1:
@@ -303,10 +353,13 @@ def consolidate_browser_statuses(
             "no shipment fields were projected"
         )
 
+    now = datetime.now(timezone.utc)
     selected = max(
         statuses,
         key=lambda status: (
-            status.latest_move.event_time if status.latest_move and status.latest_move.event_time else datetime.min.replace(tzinfo=timezone.utc),
+            max((move.event_time for move in status.recent_moves
+                 if move.event_state == "actual" and move.event_time is not None and move.event_time <= now),
+                default=datetime.min.replace(tzinfo=timezone.utc)),
             len(status.recent_moves),
         ),
     )
@@ -318,6 +371,21 @@ def consolidate_browser_statuses(
                 discovered.append(normalized)
     selected.discovered_containers = discovered
     selected.container_discovery_authoritative = False
+    selected.validated_ocean_port = selected.destination_port
+    all_empty_returned = all(any(
+        move.source_event_name == "Empty received at CY"
+        and move.equipment_load_state == "EMPTY"
+        and move.event_state == "actual"
+        and move.event_time is not None and move.event_time <= now
+        and (same_port(status.destination_port, move.location)
+             or same_delivery_place(status.place_of_delivery, move.location))
+        and any(discharge.name.endswith("(DISC)") and discharge.event_state == "actual"
+                and discharge.event_time is not None and discharge.event_time <= move.event_time
+                and same_port(status.destination_port, discharge.location)
+                for discharge in status.recent_moves)
+        for move in status.recent_moves
+    ) for status in statuses)
+    selected.all_containers_empty_returned = all_empty_returned
     return selected
 
 
@@ -369,7 +437,14 @@ def _capture_events(lines: list[str]) -> list[dict[str, str]]:
             "Location": location,
             "Description": description,
             "Status": "estimated" if "estimated" in description.casefold() else "actual",
+            "SourceEventName": description,
         }
+        if vessel_voyage.upper() in {"EMPTY", "LADEN"}:
+            event["EquipmentLoadState"] = vessel_voyage.upper()
+        if any(word in description.casefold() for word in ("rail", "ramp", "intermodal")):
+            event["TransportMode"] = "RAIL"
+        elif any(word in description.casefold() for word in ("truck", "road")):
+            event["TransportMode"] = "TRUCK"
         if vessel_voyage and not _looks_like_event_description(vessel_voyage) and not _DATE_RE.fullmatch(vessel_voyage):
             event["VesselVoyage"] = vessel_voyage
             # The shared MSC event parser consumes separate vessel/voyage keys.
@@ -399,6 +474,9 @@ def _looks_like_event_description(value: str) -> bool:
         "empty to shipper",
         "delivery",
         "gate",
+        "import to consignee",
+        "rail",
+        "ramp",
     )
     return any(marker in normalized for marker in markers)
 

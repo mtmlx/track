@@ -46,6 +46,7 @@ class Settings:
     cf_gate_out_delivery: str | None
     cf_gate_in_empty: str | None
     cf_vessel_voyage: str | None = None
+    cf_master_bl: str | None = "8f9d6623-4723-482b-84ba-180dfba29643"
     clickup_include_closed: bool = False
     clickup_include_archived: bool = False
     clickup_use_task_status: bool = False
@@ -161,6 +162,7 @@ class Settings:
             clickup_max_total_tasks=_int("CLICKUP_MAX_TOTAL_TASKS", default=50_000),
             cf_container_no=_must("CLICKUP_CF_CONTAINER_NO"),
             cf_booking_no=_must("CLICKUP_CF_BOOKING_NO"),
+            cf_master_bl=_optional("CLICKUP_CF_MASTER_BL") or "8f9d6623-4723-482b-84ba-180dfba29643",
             cf_shipping_line=_must("CLICKUP_CF_SHIPPING_LINE"),
             cf_shipment_status=cf_shipment_status,
             cf_status_last_checked=cf_status_last_checked,

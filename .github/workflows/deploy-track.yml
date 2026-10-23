@@ -29,6 +29,8 @@ jobs:
         run: PYTHONPATH=src python -m pytest tests/test_one_rebooking.py tests/test_one_inventory_recovery.py -q
       - name: Validate CMA container coverage and DCSA event evidence
         run: PYTHONPATH=src python -m pytest tests/test_cma_cgm_containers.py tests/test_cma_cgm_oauth.py tests/test_cma_cgm_comparison.py tests/test_cma_cgm_playwright_parser.py -q
+      - name: Validate MSC ocean and inland routes, status catch-up and terminal guards
+        run: PYTHONPATH=src python -m pytest tests/test_msc_route_workflow.py tests/test_msc_bl_validation.py -q
       - name: Validate destination arrival and carrier regressions
         run: PYTHONPATH=src python -m pytest tests/test_origin_etd.py tests/test_destination_arrival.py tests/test_maersk_destination_arrival.py tests/test_maersk_adapter.py tests/test_maersk_actual_transit.py tests/test_msc_browser_assisted.py tests/test_msc_adapter.py tests/test_track_trace_mapping.py tests/test_one_adapter.py tests/test_one_empty_return.py tests/test_one_dcsa.py tests/test_tracking_failure_comments.py tests/test_sync_runtime_guards.py tests/test_msc_operator_pack.py -q
   deploy:

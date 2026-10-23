@@ -32,7 +32,9 @@ working browser/computer-use tools and can open MSC before collecting data.
 An authorized reviewer reads the live ClickUp task and supplies a manifest
 based on `manifest.example.json`, outside the checkout. Confirm the internal
 task ID, custom ID/name, booking, list, MSC carrier, eligibility, destination
-and complete current container list. Terminal/excluded tasks must not enter
+and complete current container list. Include `master_bl_no` when the task has
+a recorded Master B/L. The live reader uses `CLICKUP_CF_MASTER_BL`, defaulting
+to the existing production Master B/L field. Terminal/excluded tasks must not enter
 this test. Stop if container count or identity is disputed. Do not reuse an
 old shipment example without a new task review.
 
@@ -47,8 +49,11 @@ Create its `captures` subdirectory. Keep all live data outside Git.
 ## 3. Capture every container
 
 1. Open https://www.msc.com/en/track-a-shipment.
-2. Query each manifest container separately, not just the booking.
-3. Verify the returned container, Port of Discharge and route. Stop on mismatch.
+2. Query the booking first. If it omits a unit, query the exact recorded Master
+   B/L as well as each manifest container separately. Container-only results
+   are diagnostics, not proof of booking/B/L ownership.
+3. Verify every container, the original booking/B/L header, ocean Port of
+   Discharge and separate inland delivery. Stop on contradictory identities.
 4. Expand available movements and scroll through the entire result.
 5. Save the complete visible text, including header, POD, ETA, all event dates,
    locations, descriptions, vessel/voyage and carrier result timestamp, as
@@ -56,6 +61,13 @@ Create its `captures` subdirectory. Keep all live data outside Git.
 6. If blocked or incomplete, stop the test and report which container failed.
    Do not solve by deleting that container from the manifest or importing a
    partial batch. Do not manufacture text from assumptions or prior runs.
+
+A B/L-only fallback requires the task's exact recorded Master B/L, known complete
+container list/quantity, consistent ocean POD/delivery, and every unit's history.
+A conflicting booking header still rejects the result even if the B/L matches.
+For multi-container pages, preserve the original header and timestamp while
+isolating each contiguous container history. Never combine identity headers
+from one query with movement histories from another.
 
 The existing parser consumes text, not image-only input. Screenshots may help
 a reviewer but are not a replacement for the complete capture. Never include
@@ -119,3 +131,16 @@ Preview performs live reads but must end with `No ClickUp write was made.`
 Only after explicit approval may the maintainer perform an import, re-read
 the affected ClickUp fields and run another preview for recurrence. Historical
 data repairs, including MTMLXGT-27395, retain their separate approval gate.
+
+MSC near-arrival catch-up covers 1-10 days before ocean ETA after qualifying
+actual vessel loading/departure. Forecasts, truck/rail movement and ETA alone
+do not prove transit or arrival. Ocean arrival remains separate from discharge
+and inland delivery; every unit must have a validated empty return before
+closing a multi-container shipment. Terminal tasks remain excluded.
+
+Failure comments identify the reference/POD/allocation problem and required
+correction, mention current assignees, and deduplicate the same issue for 24
+hours. Raw exceptions/credentials stay out of comments. A changed Master B/L
+invalidates the old review. Successful T&T stamping occurs only after field,
+status and audit-comment writes succeed; an uncertain write requires readback,
+not automatic replay.

@@ -12,6 +12,56 @@ class FailureNotice:
     issue: str
     reason: str
     actions: tuple[str, ...]
+    details: tuple[str, ...] = ()
+
+
+def _msc_validation_notice(shipment: ShipmentRef, error: str) -> FailureNotice | None:
+    """Expose known validation facts, never arbitrary exception text or URLs."""
+    message = error.lower()
+    if message.startswith('msc booking search returned no results found'):
+        return FailureNotice('msc_reference_not_found',
+            'MSC returned "No results found" for the booking shown above.',
+            'This does not establish cancellation or an invalid booking. Without a matching carrier record we cannot validate dates, containers or workflow status.',
+            ('Ask the booking party to confirm the carrier-issued booking and current Master B/L, including any rebooking or split.',
+             'Record the confirmed Master B/L and allocated containers, then check those exact references on the MSC website. If MSC has not published the record, request confirmation rather than inventing identifiers.'),
+            ('Fallback references: ' + ('Master B/L is recorded.' if shipment.master_bl_no else 'Master B/L is not recorded.')
+             + (' Containers are recorded.' if shipment.container_no else ' No containers are recorded.'),))
+    if 'msc container count conflict:' in message or ('clickup has ' in message and 'number of containers' in message):
+        count = len(set(re.findall(r'\b[A-Z]{4}\d{7}\b', shipment.container_no or '', re.I)))
+        return FailureNotice('msc_container_count_conflict',
+            'The recorded container list disagrees with Number of Containers for this shipment.',
+            'A shared booking may contain separate B/L allocations. Combining those allocations could put another shipment\'s units and milestones into this task.',
+            ('Compare this task\'s exact Master B/L against MSC and the booking-party confirmation. Confirm which units belong to this B/L.',
+             'Correct only the proven allocation or quantity. Do not remove real units, reduce quantity or force a status just to bypass validation.'),
+            (f'Recorded unique containers: {count}; expected quantity: {shipment.expected_container_count if shipment.expected_container_count is not None else "not set"}.',))
+    if message.startswith('msc b/l identity conflict:'):
+        return FailureNotice('msc_bl_identity_conflict',
+            'The carrier capture has a missing, different or ambiguous Master B/L allocation.',
+            'A matching booking alone cannot authorize importing a different B/L from a shared booking.',
+            ('Check the Master B/L recorded on this task against the carrier confirmation and visible MSC result.',
+             'Capture the exact recorded B/L, with a complete history for each assigned container. Ask integration support to review conflicting results; never edit or stitch carrier headers.'))
+    if message.startswith('msc browser review is incomplete:'):
+        details = []
+        for label in ('missing', 'unexpected'):
+            match = re.search(re.escape(label) + r' container capture\(s\): ([A-Z0-9, ]+)', error)
+            refs = sorted(set(re.findall(r'\b[A-Z]{4}\d{7}\b', match.group(1)))) if match else []
+            if refs:
+                details.append(f'{label.capitalize()} container evidence: ' + ', '.join(refs[:25]) + '.')
+        binding = 'binding limitation' in message
+        return FailureNotice('msc_bl_capture_incomplete' if binding else 'msc_container_coverage',
+            'The booking capture does not cover the full recorded container allocation.',
+            ('The Master B/L result contains the units but the importer has not validated that B/L binding. This is an integration evidence gap, not proof that a container is invalid.'
+             if binding else 'We cannot safely combine missing or unexpected units with this shipment. Individual container searches alone do not prove booking/B/L ownership.'),
+            ('Search the recorded Master B/L and each listed container on MSC; preserve the original B/L header, POD, delivery place, timestamp and full histories.',
+             'Provide the full result to integration support for a validated B/L import. If the allocation differs, obtain carrier confirmation before changing task references. Do not delete containers or fabricate headers.'), tuple(details))
+    if ('destination/pod is missing' in message or message.startswith('msc journey mismatch:')
+            and not shipment.destination_port):
+        return FailureNotice('msc_destination_missing',
+            'The authoritative shipment POD is blank in ClickUp.',
+            'The carrier may show a route, but tracking cannot assume that its discharge port is the destination intended for this task.',
+            ('Confirm the destination port/code against the shipment booking or B/L and populate the task POD.',
+             'Keep ocean POD separate from inland delivery. Do not substitute a transshipment port or guess arrival/discharge dates.'))
+    return None
 
 
 def carrier_name(value: str) -> str:
@@ -92,6 +142,10 @@ def classify_failure(shipment: ShipmentRef, error: str, *, phase: str = 'lookup'
             actions.append('Wan Hai Manual Capture needed: copy and paste the entire result screen/page into this task, include screenshots of all details, and mention TracyAI for the approved manual extraction workflow.')
         return FailureNotice('carrier_blocked', 'The carrier blocked or challenged automated/browser access.',
             'No reliable result was obtained through this access path. Changing shipment data cannot resolve an anti-bot restriction.', tuple(actions))
+    if carrier_name(shipment.shipping_line) == 'MSC':
+        specific = _msc_validation_notice(shipment, error)
+        if specific is not None:
+            return specific
     if any(s in message for s in ('destination', 'port of discharge', 'pod ', 'port evidence')):
         return FailureNotice('destination_evidence',
             'The shipment destination and carrier event-location evidence are missing, ambiguous, or inconsistent.',
@@ -151,12 +205,17 @@ def failure_comment(shipment: ShipmentRef, notice: FailureNotice, *, method: str
              f'Expected container count: {shipment.expected_container_count or "not set"}']
     if reference:
         lines.append(f'Reference checked: {reference}')
+    if carrier_name(shipment.shipping_line) == 'MSC':
+        lines.append('Recorded Master B/L: ' + (shipment.master_bl_no or 'not set'))
+        lines.append('Shipment POD: ' + (shipment.destination_port or 'not set'))
     url = source_url(shipment)
     if url:
         lines.append('Carrier source: ' + url)
     lines += ['', 'ISSUE: ' + notice.issue, '',
               'IMPACT: Tracking dates, vessel/voyage, container details, and status may remain stale or incomplete. Using unsupported data could affect customer visibility, shipment documents, and manifests.',
               '', 'WHY WE CANNOT PROCEED: ' + notice.reason]
+    if notice.details:
+        lines += ['', 'VALIDATION DETAILS:', *notice.details]
     if phase == 'not_queried':
         lines.append('This shipment was not queried: an earlier carrier access failure opened the circuit breaker for this run. It is not a shipment-specific rejection.')
     elif phase == 'preflight':

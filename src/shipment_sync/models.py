@@ -20,6 +20,8 @@ class ShipmentRef:
     current_field_values: dict[str, Any] = field(default_factory=dict)
     reference_hints: list[str] = field(default_factory=list)
     destination_port: str | None = None
+    workflow_status_names: tuple[str, ...] | None = None
+    master_bl_no: str | None = None
 
 
 @dataclass
@@ -44,6 +46,9 @@ class ShipmentStatus:
     booking_only: bool = False
     container_booking_map: dict[str, str] = field(default_factory=dict)
     origin_departure: "MovementEvent | None" = None
+    place_of_delivery: str | None = None
+    validated_ocean_port: str | None = None
+    all_containers_empty_returned: bool | None = None
 
 
 @dataclass
