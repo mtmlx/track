@@ -11,6 +11,9 @@ def _normalize(value: str) -> str:
 
 
 _ALIASES = {
+    "ustpa": "tampa us",
+    "tampa": "tampa us",
+    "tampa fl": "tampa us",
     "egaly": "alexandria eg",
     "alexandria egypt": "alexandria eg",
     "alexandria egipto": "alexandria eg",
@@ -58,3 +61,12 @@ def same_port(destination: str | None, event_location: str | None) -> bool:
     if not re.fullmatch(r"[a-z][a-z0-9 ]+ [a-z]{2}", left):
         return False
     return left == right
+
+
+def same_delivery_place(destination: str | None, delivery: str | None) -> bool:
+    # This legacy dropdown denotes inland delivery, never an ocean POD alias.
+    if destination and _normalize(destination) == "kansas usa":
+        destination = "Kansas City, US"
+    if delivery and _normalize(delivery) == "kansas usa":
+        delivery = "Kansas City, US"
+    return same_port(destination, delivery)

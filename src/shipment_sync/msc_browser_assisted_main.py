@@ -13,7 +13,7 @@ from urllib.request import urlopen
 from dotenv import load_dotenv
 
 from shipment_sync.clickup_client import ClickUpClient
-from shipment_sync.config import Settings
+from shipment_sync.config import Settings, DEFAULT_SHIPMENT_TERMINAL_STATUSES
 from shipment_sync.main import _filter_shipments, _print_preview_plan
 from shipment_sync.msc_browser_assisted import (
     build_queue,
@@ -25,7 +25,8 @@ from shipment_sync.msc_browser_assisted import (
     write_queue,
 )
 from shipment_sync.terminal import terminal_safe_text
-from shipment_sync.sync import _notify_tracking_failure
+from shipment_sync.sync import _notify_tracking_failure, _terminal_shipment_status
+from shipment_sync.one_write_holds import write_hold_reason
 
 
 def main() -> None:
@@ -139,7 +140,11 @@ def _record_outcome(path, task_id, outcome, **details):
 def _import_batch(client: ClickUpClient, shipments, captures, failures, *, apply: bool, report_path=None) -> None:
     if apply:
         client._tracking_notice_delivery_failures = 0
-    shipments_by_id = {shipment.task_id: shipment for shipment in shipments}
+    terminal_statuses = getattr(getattr(client, "settings", None), "shipment_terminal_statuses",
+                                DEFAULT_SHIPMENT_TERMINAL_STATUSES)
+    shipments_by_id = {shipment.task_id: shipment for shipment in shipments
+        if not _terminal_shipment_status(shipment.current_task_status, terminal_statuses)
+        and not write_hold_reason(shipment)}
     requested_ids = {item.task_id for item in [*captures, *failures]}
     unknown_ids = sorted(requested_ids - set(shipments_by_id))
     if unknown_ids:

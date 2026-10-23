@@ -481,6 +481,9 @@ def _events_to_moves(events: list[dict[str, Any]]) -> list[MovementEvent]:
                 event_time_local_text=local_time_text,
                 event_state=_normalize_event_state(state_hint),
                 vessel_voyage=extract_event_vessel_voyage(event),
+                source_event_name=event.get("SourceEventName"),
+                equipment_load_state=event.get("EquipmentLoadState"),
+                transport_mode=event.get("TransportMode"),
             )
         )
 

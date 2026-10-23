@@ -91,6 +91,7 @@ def build_package(manifest: dict, captures_dir: Path, *, now: datetime | None = 
         booking_no=manifest["booking_no"], container_no=", ".join(containers),
         list_id=manifest["list_id"], destination_port=manifest["destination_port"],
         expected_container_count=len(containers),
+        master_bl_no=manifest.get("master_bl_no"),
     )
     status = consolidate_browser_statuses(shipment, entries)
     report = {
