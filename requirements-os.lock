@@ -6,6 +6,7 @@
 # Superseded curl/GStreamer/libheif pins refreshed from Ubuntu updates on 2026-09-28.
 # ECR-blocked runtime libraries pinned to Ubuntu updates on 2026-09-28.
 # libX11 security pins refreshed for USN-8913-1 on 2026-10-12.
+# zlib security pin refreshed for USN-8954-1 on 2026-10-23.
 at-spi2-common=2.60.4-0ubuntu0.1
 base-files=14ubuntu6.2
 bsdutils=1:2.41.3-3ubuntu2.2
@@ -104,4 +105,4 @@ systemd-sysv=259.5-0ubuntu3.4
 tar=1.35+dfsg-4ubuntu0.4
 tzdata=2026c-0ubuntu0.26.04.1
 util-linux=2.41.3-3ubuntu2.2
-zlib1g=1:1.3.dfsg+really1.3.1-1ubuntu3.1
+zlib1g=1:1.3.dfsg+really1.3.1-1ubuntu3.2
