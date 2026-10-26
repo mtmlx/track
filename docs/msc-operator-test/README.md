@@ -48,6 +48,16 @@ Create its `captures` subdirectory. Keep all live data outside Git.
 
 ## 3. Capture every container
 
+MSC tasks tagged `legal case` or `legal-case-do-not-update` are legal holds. Do not import,
+stamp, change status, modify tracking fields or post automated failure comments
+for them. The marker is an explicit owner instruction, not a terminal workflow
+status. It must not be removed automatically when carrier evidence changes.
+For the owner's 2025-loading review, protect the whole task if any recorded
+container has an actual 2025 vessel/barge load without verified subsequent
+delivery evidence. Keep the evidence and uncertainty in the private report;
+add only the authorized legal marker/initial explanatory note, not an operational
+status change. Resume only after explicit owner authorization.
+
 1. Open https://www.msc.com/en/track-a-shipment.
 2. Query the booking first. If it omits a unit, query the exact recorded Master
    B/L as well as each manifest container separately. Container-only results

@@ -27,7 +27,7 @@ from .models import (
     ShipmentWriteResult,
 )
 from .tracking_failures import carrier_name, classify_failure, failure_comment
-from .one_write_holds import write_hold_reason
+from .one_write_holds import write_hold_reason, msc_legal_hold
 
 
 class ClickUpWorkloadLimitError(RuntimeError):
@@ -190,6 +190,7 @@ class ClickUpClient:
                     reference_hints=reference_hints,
                     destination_port=_shipment_destination(fields),
                     master_bl_no=_field_text(fields.get(self.settings.cf_master_bl)),
+                    tags=_task_tags(task),
                     workflow_status_names=self._workflow_status_names(list_id, _task_status_text(task), list_name),
                 )
             )
@@ -265,6 +266,7 @@ class ClickUpClient:
                     expected_container_count=_expected_container_count(task.get("custom_fields", [])),
                     destination_port=_shipment_destination(fields),
                     master_bl_no=_field_text(fields.get(self.settings.cf_master_bl)),
+                    tags=_task_tags(task),
                     workflow_status_names=self._workflow_status_names(list_id, _task_status_text(task), list_obj.get("name")),
                     current_field_values={
                         field_id: field_payload.get("value")
@@ -724,6 +726,8 @@ class ClickUpClient:
         return comments
 
     def plan_shipment_update(self, shipment: ShipmentRef, status: ShipmentStatus) -> ShipmentUpdatePlan:
+        if carrier_name(shipment.shipping_line) == 'MSC' and msc_legal_hold(shipment.tags):
+            raise ValueError(write_hold_reason(shipment))
         if carrier_name(shipment.shipping_line) == "Maersk":
             from .carriers.maersk import select_destination_arrival
 
@@ -971,8 +975,10 @@ class ClickUpClient:
         try:
             is_msc_browser = (carrier_name(shipment.shipping_line) == 'MSC'
                               and status.raw_source == 'msc-browser-assisted:capture')
-            if is_msc_browser and shipment.master_bl_no:
+            if carrier_name(shipment.shipping_line) == 'MSC' and shipment.master_bl_no:
                 current = self.get_shipments_by_task_ids([shipment.task_id], allowed_list_ids={shipment.list_id})
+                if current and write_hold_reason(current[0]):
+                    raise ValueError(write_hold_reason(current[0]))
                 identity = lambda ref: (ref.shipping_line, ref.booking_no, ref.master_bl_no,
                     ref.container_no, ref.expected_container_count, ref.destination_port, ref.current_task_status)
                 if len(current) != 1 or identity(current[0]) != identity(shipment):
@@ -1063,8 +1069,10 @@ class ClickUpClient:
         task = response.json()
         if task.get("id") != shipment.task_id:
             raise ValueError("Tracking failure comment task identity mismatch")
+        if carrier_name(shipment.shipping_line) == 'MSC' and msc_legal_hold(_task_tags(task)):
+            return False
         def signature(value):
-            return json.dumps([value.get('custom_fields'), value.get('status'),
+            return json.dumps([value.get('custom_fields'), value.get('status'), _task_tags(value),
                 sorted(int(u['id']) for u in value.get('assignees') or [])], sort_keys=True)
         task_signature = signature(task)
         fields = _field_map(task.get("custom_fields") or [])
@@ -2860,6 +2868,11 @@ def _extract_first_url(value: str | None) -> str | None:
     if not match:
         return None
     return match.group(0).rstrip(".,;)")
+
+
+def _task_tags(task: dict) -> tuple[str, ...]:
+    return tuple(tag['name'] for tag in task.get('tags') or []
+                 if isinstance(tag, dict) and isinstance(tag.get('name'), str))
 
 
 def _msc_booking_fallback_note(shipment: ShipmentRef, status: ShipmentStatus) -> str | None:

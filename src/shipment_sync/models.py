@@ -22,6 +22,7 @@ class ShipmentRef:
     destination_port: str | None = None
     workflow_status_names: tuple[str, ...] | None = None
     master_bl_no: str | None = None
+    tags: tuple[str, ...] = ()
 
 
 @dataclass
