@@ -951,6 +951,10 @@ class ClickUpClient:
         else:
             comment_text = None
 
+        fallback_note = _msc_booking_fallback_note(shipment, status)
+        if fallback_note:
+            comment_text = (comment_text + '\n\n' if comment_text else '') + fallback_note
+
         return ShipmentUpdatePlan(
             changed=plan_changed,
             status_value=status_value,
@@ -1008,7 +1012,12 @@ class ClickUpClient:
                     raise
 
         if plan.comment_text:
-            self._post_comment(shipment.task_id, plan.comment_text)
+            fallback_note = _msc_booking_fallback_note(shipment, status)
+            already_noted = (fallback_note and plan.comment_text == fallback_note
+                             and any(fallback_note in text for text in
+                                     self._fetch_recent_task_comment_texts(shipment.task_id, limit=25)))
+            if not already_noted:
+                self._post_comment(shipment.task_id, plan.comment_text)
         for update in completion_updates:
             self._set_date_custom_field(shipment.task_id, update.field_id, update.value, include_time=True)
         return ShipmentWriteResult(
@@ -2851,6 +2860,23 @@ def _extract_first_url(value: str | None) -> str | None:
     if not match:
         return None
     return match.group(0).rstrip(".,;)")
+
+
+def _msc_booking_fallback_note(shipment: ShipmentRef, status: ShipmentStatus) -> str | None:
+    if not (carrier_name(shipment.shipping_line) == 'MSC'
+            and status.raw_source == 'msc-browser-assisted:capture'
+            and status.msc_booking_anchored_fallback):
+        return None
+    return (
+        'MSC booking-anchored tracking: Master B/L not independently validated.\n'
+        f'Validated booking: {shipment.booking_no}\n'
+        f'Recorded Master B/L retained: {shipment.master_bl_no}\n'
+        'MSC returned the exact booking, one B/L allocation, the complete recorded '
+        'container set, matching quantity and ocean POD, but no visible B/L number. '
+        'Tracking proceeded on that booking evidence; this does not confirm or replace '
+        'the recorded Master B/L. The assignee should confirm the carrier-issued '
+        'Master B/L and allocation with the booking party before using it for documents.'
+    )
 
 
 def _compute_snapshot_hash(

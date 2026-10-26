@@ -49,6 +49,7 @@ class ShipmentStatus:
     place_of_delivery: str | None = None
     validated_ocean_port: str | None = None
     all_containers_empty_returned: bool | None = None
+    msc_booking_anchored_fallback: bool = False
 
 
 @dataclass

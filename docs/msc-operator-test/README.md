@@ -69,6 +69,17 @@ For multi-container pages, preserve the original header and timestamp while
 isolating each contiguous container history. Never combine identity headers
 from one query with movement histories from another.
 
+When MSC displays no B/L number, a booking-anchored fallback may retain the
+recorded Master B/L without independently validating it. The original result
+must show the exact booking, explicitly one B/L allocation and a container
+quantity equal to the task's known quantity. Every recorded container must be
+captured exactly once, with no extra units, mixed B/L evidence or conflicting
+identity. The authoritative task POD must match the ocean discharge port;
+an inland delivery match alone does not qualify. A visible conflicting B/L
+still blocks import. ClickUp comments flag this limited validation and request
+the assignee's document-level confirmation. Repeated fallback-only notes are
+deduplicated against recent task comments; operational changes remain logged.
+
 The existing parser consumes text, not image-only input. Screenshots may help
 a reviewer but are not a replacement for the complete capture. Never include
 cookies, login pages, passwords or unrelated browser content in the handoff.

@@ -171,3 +171,82 @@ def test_changed_master_bl_blocks_write_before_any_mutation(monkeypatch):
     with pytest.raises(ValueError, match='changed after capture review') as error:
         c.update_shipment_status(ref, ShipmentStatus('Test', raw_source='msc-browser-assisted:capture'))
     assert error.value.shipment_sync_phase == 'projection'
+
+
+BOOKING_ONLY = 'BOOKING NUMBER: BOOK-1 1 Bill of Lading found\nBill of Lading:\n(2 Containers )'
+
+
+def test_booking_fallback_validates_complete_set_without_replacing_master_bl():
+    ref = ship()
+    result = validate(ref, capture(header=BOOKING_ONLY), capture('MSCU7654321', header=BOOKING_ONLY))
+    assert result.msc_booking_anchored_fallback
+    assert result.discovered_containers == ['MSCU1234567', 'MSCU7654321']
+    assert not result.container_discovery_authoritative
+    assert ref.master_bl_no == 'MEDUTEST001'
+
+
+@pytest.mark.parametrize('header', [
+    BOOKING_ONLY.replace('BOOK-1', 'OTHER'),
+    BOOKING_ONLY.replace('1 Bill', '2 Bills'),
+    BOOKING_ONLY.replace('(2 Containers )', '(1 Container )'),
+    BOOKING_ONLY.replace(' 1 Bill of Lading found', ''),
+    BOOKING_ONLY.replace('(2 Containers )', ''),
+    BOOKING_ONLY + '\nBILL OF LADING: MEDUOTHER001',
+    BOOKING_ONLY + '\nBOOKING NUMBER: OTHER',
+])
+def test_booking_fallback_rejects_ambiguous_or_contradictory_identity(header):
+    with pytest.raises(ValueError):
+        validate(ship(), capture(header=header), capture('MSCU7654321', header=header))
+
+
+@pytest.mark.parametrize('overrides', [dict(expected_container_count=None), dict(container_no=None),
+    dict(destination_port=None), dict(destination_port='Charleston / Antwerp')])
+def test_booking_fallback_requires_known_allocation_and_destination(overrides):
+    with pytest.raises(ValueError):
+        validate(ship(**overrides), capture(header=BOOKING_ONLY), capture('MSCU7654321', header=BOOKING_ONLY))
+
+
+def test_booking_fallback_cannot_match_only_inland_delivery():
+    with pytest.raises(ValueError):
+        validate(ship(), capture(header=BOOKING_ONLY, pod='Long Beach, US'),
+                 capture('MSCU7654321', header=BOOKING_ONLY, pod='Long Beach, US'))
+
+
+@pytest.mark.parametrize('texts', [
+    (capture(header=BOOKING_ONLY),),
+    (capture(header=BOOKING_ONLY), capture('MSCU0000001', header=BOOKING_ONLY)),
+    (capture(header=BOOKING_ONLY), capture('MSCU7654321', header=BOOKING_ONLY), capture(header=BOOKING_ONLY)),
+    (capture(header=BOOKING_ONLY), capture('MSCU7654321')),
+])
+def test_booking_fallback_rejects_partial_extra_duplicate_or_mixed_evidence(texts):
+    with pytest.raises(ValueError):
+        validate(ship(), *texts)
+
+
+def test_confirmed_bl_does_not_claim_booking_fallback():
+    assert not validate(ship(), capture(), capture('MSCU7654321')).msc_booking_anchored_fallback
+
+
+def test_booking_fallback_projection_is_flagged_and_preserves_master_bl():
+    ref = ship()
+    result = validate(ref, capture(header=BOOKING_ONLY), capture('MSCU7654321', header=BOOKING_ONLY))
+    client = ClickUpClient(_settings())
+    plan = client.plan_shipment_update(ref, result)
+    assert 'Master B/L not independently validated' in plan.comment_text
+    assert 'Recorded Master B/L retained: MEDUTEST001' in plan.comment_text
+    assert all(u.field_id != client.settings.cf_master_bl for u in plan.custom_field_updates)
+
+
+def test_booking_fallback_audit_only_comment_is_deduplicated(monkeypatch):
+    from shipment_sync.clickup_client import _msc_booking_fallback_note
+
+    client = ClickUpClient(_settings())
+    ref = ship()
+    status = ShipmentStatus('Test', raw_source='msc-browser-assisted:capture', msc_booking_anchored_fallback=True)
+    note = _msc_booking_fallback_note(ref, status)
+    plan = ShipmentUpdatePlan(False, 'Test', 'hash', comment_text=note)
+    monkeypatch.setattr(client, 'get_shipments_by_task_ids', lambda *a, **k: [ref])
+    monkeypatch.setattr(client, 'plan_shipment_update', lambda *a: plan)
+    monkeypatch.setattr(client, '_fetch_recent_task_comment_texts', lambda *a, **k: ['Earlier update\n' + note])
+    monkeypatch.setattr(client, '_post_comment', lambda *a: pytest.fail('Repeated fallback-only comment'))
+    client.update_shipment_status(ref, status)
