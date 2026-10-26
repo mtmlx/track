@@ -260,7 +260,9 @@ def validate_browser_journey(shipment: ShipmentRef, capture: MscBrowserCapture) 
     bl_headers = _visible_master_bls(capture.capture)
     if booking_headers and booking_headers != {anchor}:
         raise ValueError("MSC journey mismatch: visible booking/BL does not match the shipment; container-only evidence is insufficient")
-    if master_bl and bl_headers != {master_bl}:
+    if master_bl and not bl_headers:
+        _validate_booking_anchor(shipment, capture, booking_headers)
+    elif master_bl and bl_headers != {master_bl}:
         raise ValueError("MSC B/L identity conflict: the visible Master B/L is missing, ambiguous or does not match the recorded Master B/L")
     if not booking_headers:
         # B/L-only pages can rescue incomplete booking results, never unbound
@@ -290,6 +292,25 @@ def _visible_master_bls(text: str) -> set[str]:
     )}
 
 
+def _validate_booking_anchor(
+    shipment: ShipmentRef, capture: MscBrowserCapture, booking_headers: set[str],
+) -> None:
+    expected = set(_container_references(shipment.container_no))
+    count = shipment.expected_container_count
+    allocations = re.findall(r"\b(\d+)\s+Bill(?:s)? of Lading found\b", capture.capture, re.IGNORECASE)
+    quantities = re.findall(r"\(\s*(\d+)\s+Containers?\s*\)", capture.capture, re.IGNORECASE)
+    lines = [line.strip() for line in capture.capture.splitlines() if line.strip()]
+    if not (shipment.booking_no and booking_headers == {shipment.booking_no.strip().upper()}
+            and expected and count is not None and count > 0 and len(expected) == count
+            and allocations and set(allocations) == {'1'}
+            and quantities and {int(value) for value in quantities} == {count}
+            and same_port(shipment.destination_port, _value_after_label(lines, 'Port of Discharge'))):
+        raise ValueError(
+            'MSC B/L identity conflict: booking-anchored fallback requires the exact booking, '
+            'one visible B/L allocation, a known matching container quantity and ocean POD'
+        )
+
+
 def consolidate_browser_statuses(
     shipment: ShipmentRef,
     captures: Iterable[tuple[MscBrowserCapture, ShipmentStatus]],
@@ -307,6 +328,10 @@ def consolidate_browser_statuses(
     bl_sets = {_canonical_text(bl) for capture, _ in entries for bl in _visible_master_bls(capture.capture)}
     if len(bl_sets) > 1:
         raise ValueError("MSC B/L identity conflict: captures contain different Master B/L allocations")
+    booking_fallback = bool(shipment.master_bl_no and any(
+        not _visible_master_bls(capture.capture) for capture, _ in entries))
+    if booking_fallback and (bl_sets or len(entries) != len(expected_set)):
+        raise ValueError('MSC B/L identity conflict: booking fallback cannot mix B/L evidence or duplicate/partial container captures')
     reviewed_references: set[str] = set()
     for capture, status in entries:
         reference = capture_reference(capture)
@@ -371,6 +396,7 @@ def consolidate_browser_statuses(
                 discovered.append(normalized)
     selected.discovered_containers = discovered
     selected.container_discovery_authoritative = False
+    selected.msc_booking_anchored_fallback = booking_fallback
     selected.validated_ocean_port = selected.destination_port
     all_empty_returned = all(any(
         move.source_event_name == "Empty received at CY"

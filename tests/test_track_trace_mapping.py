@@ -448,7 +448,7 @@ def test_plan_shipment_update_moves_rta_to_arrived_ramp_after_actual_rail_ramp_a
             MovementEvent(
                 name="Container Arrived at Rail Ramp",
                 location="DALLAS RAMP",
-                event_time=_days_from_now(0),
+                event_time=datetime.now(timezone.utc) - timedelta(minutes=1),
                 event_state="actual",
             ),
         ],
