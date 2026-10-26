@@ -151,6 +151,7 @@ def test_msc_diagnostic_deduplication_and_owner_mentions(monkeypatch):
 def test_msc_status_write_failure_never_stamps_success(monkeypatch):
     c = ClickUpClient(_settings())
     ref = ship(master_bl_no=None)
+    monkeypatch.setattr(c, 'get_shipments_by_task_ids', lambda *a, **k: [ref])
     status = ShipmentStatus('Test', raw_source='msc-browser-assisted:capture')
     plan = ShipmentUpdatePlan(True, 'Test', 'hash',
         [ShipmentFieldWrite(c.settings.cf_status_last_checked, datetime.now(timezone.utc), 'datetime')],

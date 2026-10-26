@@ -10,6 +10,7 @@ from typing import Iterable
 from shipment_sync.carriers.msc import _status_from_payload
 from shipment_sync.destination import same_delivery_place, same_port
 from shipment_sync.models import ShipmentRef, ShipmentStatus
+from shipment_sync.one_write_holds import write_hold_reason
 
 
 MSC_TRACKING_URL = "https://www.msc.com/en/track-a-shipment"
@@ -52,6 +53,8 @@ def build_queue(shipments: Iterable[ShipmentRef]) -> list[MscBrowserQueueItem]:
     """Build a local review queue. This function performs no carrier or ClickUp writes."""
     items: list[MscBrowserQueueItem] = []
     for shipment in shipments:
+        if write_hold_reason(shipment):
+            continue
         if not is_msc_line(shipment.shipping_line):
             continue
         references = _container_references(shipment.container_no)
