@@ -1,6 +1,7 @@
 """Reviewed repair holds and explicit MSC legal-case tracking exclusions."""
 import json
 from importlib.resources import files
+from shipment_sync.tracking_failures import carrier_name
 
 MSC_LEGAL_HOLD_TAG = 'legal-case-do-not-update'
 
@@ -10,7 +11,7 @@ def msc_legal_hold(tags):
 
 
 def write_hold_reason(shipment):
-    if shipment.shipping_line.strip().lower() == 'msc' and msc_legal_hold(getattr(shipment, 'tags', ())):
+    if carrier_name(shipment.shipping_line) == 'MSC' and msc_legal_hold(getattr(shipment, 'tags', ())):
         return 'LEGAL CASE - DO NOT UPDATE: explicit owner hold; no tracking fields, statuses, timestamps or automated comments until authorized release.'
     if shipment.shipping_line.strip().lower() != 'one':
         return None

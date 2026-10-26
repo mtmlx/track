@@ -13,8 +13,9 @@ from test_track_trace_mapping import _settings
 
 
 @pytest.mark.parametrize('tag', [MSC_LEGAL_HOLD_TAG, ' LEGAL-CASE-DO-NOT-UPDATE ', 'legal case', ' Legal Case '])
-def test_msc_legal_marker_excludes_queue_and_projection(tag):
-    ref = ship(tags=(tag,))
+@pytest.mark.parametrize('carrier', ['MSC', 'msc shipping line', 'mediterranean shipping company'])
+def test_msc_legal_marker_excludes_queue_and_projection(tag, carrier):
+    ref = ship(tags=(tag,), shipping_line=carrier)
     assert write_hold_reason(ref)
     assert build_queue([ref]) == []
     with pytest.raises(ValueError, match='LEGAL CASE'):
@@ -34,13 +35,22 @@ def test_legal_hold_stops_all_writeback_before_planning(monkeypatch):
 
 
 @pytest.mark.parametrize('source', ['msc-browser-assisted:capture', 'msc-api'])
-def test_new_legal_marker_is_rechecked_before_stale_writeback(monkeypatch, source):
+@pytest.mark.parametrize('mbl', [None, 'MEDU12345678'])
+def test_new_legal_marker_is_rechecked_before_stale_writeback(monkeypatch, source, mbl):
     client = ClickUpClient(_settings())
-    ref = ship()
+    ref = ship(master_bl_no=mbl)
     monkeypatch.setattr(client, 'get_shipments_by_task_ids', lambda *a, **k: [replace(ref, tags=(MSC_LEGAL_HOLD_TAG,))])
     monkeypatch.setattr(client, 'plan_shipment_update', lambda *a: pytest.fail('Stale legal hold reached planner'))
     with pytest.raises(ValueError, match='LEGAL CASE'):
         client.update_shipment_status(ref, ShipmentStatus('Test', raw_source=source))
+
+
+def test_missing_live_msc_task_stops_writeback(monkeypatch):
+    client = ClickUpClient(_settings())
+    monkeypatch.setattr(client, 'get_shipments_by_task_ids', lambda *a, **k: [])
+    monkeypatch.setattr(client, 'plan_shipment_update', lambda *a: pytest.fail('Missing live task reached planner'))
+    with pytest.raises(ValueError, match='identity or workflow changed'):
+        client.update_shipment_status(ship(master_bl_no=None), ShipmentStatus('Test'))
 
 
 def test_task_reader_loads_legal_marker(monkeypatch):

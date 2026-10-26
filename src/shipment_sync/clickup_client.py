@@ -975,7 +975,7 @@ class ClickUpClient:
         try:
             is_msc_browser = (carrier_name(shipment.shipping_line) == 'MSC'
                               and status.raw_source == 'msc-browser-assisted:capture')
-            if carrier_name(shipment.shipping_line) == 'MSC' and shipment.master_bl_no:
+            if carrier_name(shipment.shipping_line) == 'MSC':
                 current = self.get_shipments_by_task_ids([shipment.task_id], allowed_list_ids={shipment.list_id})
                 if current and write_hold_reason(current[0]):
                     raise ValueError(write_hold_reason(current[0]))
