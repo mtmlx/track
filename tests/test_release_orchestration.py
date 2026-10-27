@@ -3,11 +3,38 @@ import copy
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
+import subprocess
 import pytest
 
 spec = importlib.util.spec_from_file_location('track_release', Path(__file__).parents[1] / 'deploy/aws-ecs/release/release.py')
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
+
+
+def test_iam_drift_stops_release_before_any_aws_write(monkeypatch, tmp_path):
+    sha = 'a' * 40
+    monkeypatch.setenv('RELEASE_SHA', sha)
+    monkeypatch.setenv('GITHUB_REF', 'refs/heads/main')
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'mtmlx/track')
+    monkeypatch.setattr(release.subprocess, 'check_output', lambda *a, **k: sha)
+    client = Mock()
+    client.get_caller_identity.return_value = {'Account': release.ACCOUNT}
+    session = Mock()
+    session.client.return_value = client
+    monkeypatch.setattr(release.boto3, 'Session', lambda **k: session)
+    monkeypatch.setattr(release, 'EVIDENCE', tmp_path)
+    commands = []
+    def reject_guard(command, **kwargs):
+        commands.append(command)
+        raise subprocess.CalledProcessError(1, command)
+    monkeypatch.setattr(release.subprocess, 'run', reject_guard)
+    with pytest.raises(subprocess.CalledProcessError):
+        release.main()
+    assert len(commands) == 1
+    assert commands[0][1] == str(release.ROOT.parents[2] / 'scripts/check_cloudwatch_iam.py')
+    assert '--live' in commands[0]
+    assert [call[0] for call in client.method_calls] == ['get_caller_identity']
 
 class Scheduler:
     def __init__(self, state, fail=None, concurrent=False):

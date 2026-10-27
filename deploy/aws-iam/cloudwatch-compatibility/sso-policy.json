@@ -1,0 +1,97 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InvoiceServiceHealth",
+      "Effect": "Allow",
+      "Action": [
+        "elasticbeanstalk:DescribeEnvironments",
+        "elasticbeanstalk:DescribeEvents",
+        "elasticbeanstalk:DescribeInstancesHealth",
+        "elasticbeanstalk:DescribeEnvironmentHealth"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "InvoiceServiceLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogStreams",
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents"
+      ],
+      "Resource": [
+        "arn:aws:logs:us-east-1:525753067477:log-group:/aws/elasticbeanstalk/mtm-gt-invoice-webhook-prod/*:*",
+        "arn:aws:logs:us-east-1:525753067477:log-group:/aws/elasticbeanstalk/mtm-gt-invoice-webhook-prod:*"
+      ]
+    },
+    {
+      "Sid": "InspectOwnRuntimeSecretStatus",
+      "Effect": "Allow",
+      "Action": "secretsmanager:DescribeSecret",
+      "Resource": "arn:aws:secretsmanager:us-east-1:525753067477:secret:mtm/finance/cfo-recovery/tamara-*"
+    },
+    {
+      "Sid": "LoadOnlyApprovedRotatedRuntime",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:us-east-1:525753067477:secret:mtm/finance/cfo-recovery/tamara-*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/RotationRequired": "false"
+        }
+      }
+    },
+    {
+      "Sid": "ReadInvoiceProductionConfiguration",
+      "Effect": "Allow",
+      "Action": "elasticbeanstalk:DescribeConfigurationSettings",
+      "Resource": [
+        "arn:aws:elasticbeanstalk:us-east-1:525753067477:application/mtm-gt-invoice-webhook",
+        "arn:aws:elasticbeanstalk:us-east-1:525753067477:environment/mtm-gt-invoice-webhook/mtm-gt-invoice-webhook-prod"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "ElasticBeanstalkConfigurationStorageDependency",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:PutBucketOwnershipControls"
+      ],
+      "Resource": "arn:aws:s3:::elasticbeanstalk-us-east-1-525753067477"
+    },
+    {
+      "Sid": "ReadSubnetConfigurationDependency",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeSubnets",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "InvoiceServiceLogsLogGroupArnCompatibility",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogStreams",
+        "logs:FilterLogEvents"
+      ],
+      "Resource": [
+        "arn:aws:logs:us-east-1:525753067477:log-group:/aws/elasticbeanstalk/mtm-gt-invoice-webhook-prod/*",
+        "arn:aws:logs:us-east-1:525753067477:log-group:/aws/elasticbeanstalk/mtm-gt-invoice-webhook-prod"
+      ]
+    }
+  ]
+}

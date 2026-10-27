@@ -104,6 +104,15 @@
           "iam:PassedToService": "codebuild.amazonaws.com"
         }
       }
+    },
+    {
+      "Sid": "ReadReviewedCloudWatchCompatibilityPolicies",
+      "Effect": "Allow",
+      "Action": "iam:GetRolePolicy",
+      "Resource": [
+        "arn:aws:iam::525753067477:role/MTMLx_CFO_Recovery",
+        "arn:aws:iam::525753067477:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_MTMInvoiceOperatorTamara_fda5a47055297712"
+      ]
     }
   ]
 }
