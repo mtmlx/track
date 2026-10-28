@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 
 import boto3
@@ -98,6 +99,10 @@ def main():
         raise RuntimeError('Wrong AWS account')
     s3, cb, ecr, ecs, scheduler = [session.client(n) for n in ['s3', 'codebuild', 'ecr', 'ecs', 'scheduler']]
     EVIDENCE.mkdir(exist_ok=True)
+    # Fail before builds, task revisions, or schedule changes if reviewed IAM
+    # access was lost. This guard reads exact policies and never repairs them.
+    subprocess.run([sys.executable, str(ROOT.parents[2] / 'scripts/check_cloudwatch_iam.py'),
+                    '--live', '--evidence', str(EVIDENCE / 'cloudwatch-iam.json')], check=True)
     release_id = sha + '-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
     def save(name, data):
         body = json.dumps(data, indent=2, default=str)

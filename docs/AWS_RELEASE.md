@@ -17,3 +17,11 @@ CLICKUP_USE_TASK_STATUS=false in the example prevents native task-status changes
 ## Automatic GitHub releases
 
 See [CLOUD_DEVELOPMENT.md](CLOUD_DEVELOPMENT.md). Once merged, `.github/workflows/deploy-track.yml` performs this build, validation and schedule-target promotion after approved changes reach main. It always overrides the existing CodeBuild source with the exact GitHub commit archive and preserves rollback evidence. Manual intervention is needed only for failed gates or recovery. Do not run a second manual deployment concurrently with the workflow.
+
+## CloudWatch IAM preservation
+
+Before any release mutations, the entrypoint verifies that both reviewed invoice
+log-access role policies still contain every original and compatibility statement.
+See [CLOUDWATCH_IAM_COMPATIBILITY.md](CLOUDWATCH_IAM_COMPATIBILITY.md) for canonical
+policies, Identity Center ownership, candidate validation, and operator pre/post
+checks. Never roll back these IAM additions with an application rollback.

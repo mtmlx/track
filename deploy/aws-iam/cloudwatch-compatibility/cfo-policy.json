@@ -1,0 +1,53 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadExactCFORecoverySecret",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": "arn:aws:secretsmanager:us-east-1:525753067477:secret:mtm/finance/cfo-recovery/tamara-*"
+    },
+    {
+      "Sid": "ReadInvoiceServiceState",
+      "Effect": "Allow",
+      "Action": [
+        "elasticbeanstalk:DescribeApplicationVersions",
+        "elasticbeanstalk:DescribeConfigurationSettings",
+        "elasticbeanstalk:DescribeEnvironments",
+        "elasticbeanstalk:DescribeEvents",
+        "elasticbeanstalk:DescribeInstancesHealth"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadInvoiceServiceLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents"
+      ],
+      "Resource": [
+        "arn:aws:logs:us-east-1:525753067477:log-group:/aws/elasticbeanstalk/mtm-gt-invoice-webhook-prod:*",
+        "arn:aws:logs:us-east-1:525753067477:log-group:/aws/elasticbeanstalk/mtm-gt-invoice-webhook-prod/*:*"
+      ]
+    },
+    {
+      "Sid": "ReadInvoiceServiceLogsLogGroupArnCompatibility",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:FilterLogEvents"
+      ],
+      "Resource": [
+        "arn:aws:logs:us-east-1:525753067477:log-group:/aws/elasticbeanstalk/mtm-gt-invoice-webhook-prod",
+        "arn:aws:logs:us-east-1:525753067477:log-group:/aws/elasticbeanstalk/mtm-gt-invoice-webhook-prod/*"
+      ]
+    }
+  ]
+}
