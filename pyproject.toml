@@ -30,6 +30,7 @@ clickup-fields-export = "shipment_sync.clickup_fields_main:main"
 clickup-workspace-audit = "shipment_sync.clickup_audit_main:main"
 dcsa-tnt-ingest = "shipment_sync.dcsa_tnt_main:main"
 dcsa-tnt-shadow = "shipment_sync.dcsa_shadow_main:main"
+eta-shadow-capture = "shipment_sync.eta_shadow_capture_main:main"
 cma-cgm-dcsa-compare = "shipment_sync.cma_cgm_comparison_main:main"
 msc-browser-assisted = "shipment_sync.msc_browser_assisted_main:main"
 
