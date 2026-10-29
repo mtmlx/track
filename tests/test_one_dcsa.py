@@ -7,9 +7,68 @@ from test_track_trace_mapping import _settings
 
 
 def split_shipment():
-    return ShipmentRef('86e2bkqh7', 'MTMLXGT-31624', 'one', 'NB6BI3181300',
+    return ShipmentRef('reviewed-split-fixture', 'Reviewed combined split fixture', 'one', 'NB6BI3181300',
                        'ONEU4454604, ONEU4413040', 'list', expected_container_count=2,
                        destination_port='PUERTO QUETZAL', current_task_status='Tránsito')
+
+
+@pytest.fixture(autouse=True)
+def reviewed_combined_split_fixture(monkeypatch):
+    from shipment_sync import one_split_bookings
+    registry = one_split_bookings._registry()
+    monkeypatch.setattr(one_split_bookings, '_registry', lambda: {
+        **registry,
+        'reviewed-split-fixture': {
+            'parent_booking': 'NB6BI3181300', 'destination_port': 'GTPRQ',
+            'container_bookings': {'ONEU4454604': 'NB6BI3181300', 'ONEU4413040': 'NB6BI3181301'},
+            'evidence': ['Explicit test-only combined allocation'],
+        },
+    })
+
+
+@pytest.mark.parametrize('task,booking,container,vessel,days', [
+    ('86e2bkqh7', 'NB6BI3181300', 'ONEU4454604', 'ONE SHINE', 13),
+    ('86e3v10z6', 'NB6BI3181301', 'ONEU4413040', 'ONE SERENITY', 20),
+])
+def test_separated_live_shipments_keep_their_own_container_eta_and_status(monkeypatch, task, booking, container, vessel, days):
+    s = ShipmentRef(task, task, 'one', booking, container, 'list', expected_container_count=1,
+                    destination_port='GTPRQ', current_task_status='Tránsito')
+    rows = split_events(container, booking, days, vessel)
+    status = client(monkeypatch, [(rows, {})]).fetch_status(s)
+    assert status.discovered_containers == [container]
+    assert status.container_booking_map == {container: booking}
+    assert status.eta_time == datetime.fromisoformat(rows[1]['eventDateTime'])
+    assert vessel in status.final_vessel_voyage
+    plan = ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(s, status)
+    assert plan.task_status_update is None
+    assert not any(update.label == 'Discharge date' for update in plan.custom_field_updates)
+
+
+@pytest.mark.parametrize('task,booking,container', [
+    ('86e2bkqh7', 'NB6BI3181300', 'ONEU4454604'),
+    ('86e3v10z6', 'NB6BI3181301', 'ONEU4413040'),
+])
+@pytest.mark.parametrize('bookings', [[], ['OTHER'], ['NB6BI3181300', 'NB6BI3181301']])
+def test_separated_shipments_still_require_positive_booking_identity(monkeypatch, task, booking, container, bookings):
+    s = ShipmentRef(task, task, 'one', booking, container, 'list', expected_container_count=1, destination_port='GTPRQ')
+    rows = split_events(container, booking)
+    rows[0]['documentReferences'] = [{'documentReferenceType': 'BKG', 'documentReferenceValue': b} for b in bookings]
+    with pytest.raises(ValueError, match='split booking event'):
+        client(monkeypatch, [(rows, {})]).fetch_status(s)
+
+
+@pytest.mark.parametrize('task,booking,container', [
+    ('86e2bkqh7', 'NB6BI3181300', 'ONEU4413040'),
+    ('86e3v10z6', 'NB6BI3181301', 'ONEU4454604'),
+    ('86e2bkqh7', 'NB6BI3181301', 'ONEU4454604'),
+    ('86e2bkqh7', 'NB6BI3181300', 'ONEU4454604, ONEU4413040'),
+])
+def test_separated_shipments_reject_cross_task_or_recombined_allocations(monkeypatch, task, booking, container):
+    s = ShipmentRef(task, task, 'one', booking, container, 'list', expected_container_count=1, destination_port='GTPRQ')
+    c = OneDcsaClient()
+    monkeypatch.setattr(c, '_token', lambda: pytest.fail('invalid allocation must fail before carrier lookup'))
+    with pytest.raises(ValueError, match='mapping conflicts'):
+        c.fetch_status(s)
 
 
 def split_events(reference, booking, eta_days=10, vessel='FINAL SHIP'):

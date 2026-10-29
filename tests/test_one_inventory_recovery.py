@@ -8,7 +8,7 @@ from shipment_sync.clickup_client import ClickUpClient
 from shipment_sync.models import MovementEvent
 from shipment_sync.one_split_bookings import container_bookings
 from shipment_sync.sync import _run_sync
-from test_one_dcsa import client, conflict_client, event, shipment, split_events, split_shipment
+from test_one_dcsa import client, conflict_client, event, shipment, split_events, split_shipment, reviewed_combined_split_fixture
 from test_one_rebooking import forecast_rows, writer
 from test_track_trace_mapping import _settings
 
