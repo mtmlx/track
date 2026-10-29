@@ -4,14 +4,27 @@
     "parent_booking": "NB6BI3181300",
     "destination_port": "GTPRQ",
     "container_bookings": {
-      "ONEU4454604": "NB6BI3181300",
-      "ONEU4413040": "NB6BI3181301"
+      "ONEU4454604": "NB6BI3181300"
     },
-    "reviewed_at": "2026-10-16",
+    "reviewed_at": "2026-10-29",
     "evidence": [
       "https://www.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam=NB6BI3181300&trakNoTpCdParam=B",
-      "https://www.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam=NB6BI3181301&trakNoTpCdParam=B",
-      "ClickUp 86e2bkqh7: carrier MBL attachments ONEYNB6BI3181300.pdf.pdf and ONEYNB6BI3181301.pdf.pdf"
+      "ClickUp 86e2bkqh7: confirmed task separation; ONEU4413040 belongs to linked task 86e3v10z6, not this task",
+      "ONE DCSA equipmentReference ONEU4454604: booking NB6BI3181300, verified 2026-10-29"
+    ]
+  },
+  "86e3v10z6": {
+    "shipment": "MTMLXGT-34830",
+    "parent_booking": "NB6BI3181301",
+    "destination_port": "GTPRQ",
+    "container_bookings": {
+      "ONEU4413040": "NB6BI3181301"
+    },
+    "reviewed_at": "2026-10-29",
+    "evidence": [
+      "https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?trakNoParam=NB6BI3181301&trakNoTpCdParam=B",
+      "ClickUp 86e3v10z6: separate shipment for ONEU4413040, MBL ONEYNB6BI3181301 and HBL WH26090006B",
+      "ClickUp 86e2bkqh7 comments 90170266567717 and 90170265815742 confirm the separate task allocation"
     ]
   }
 }
