@@ -5,7 +5,7 @@ import pytest
 
 from shipment_sync.clickup_client import ClickUpClient, ClickUpWorkloadLimitError, _build_task_status_update
 from shipment_sync.destination import same_delivery_place, same_port
-from shipment_sync.models import ShipmentRef
+from shipment_sync.models import ShipmentRef, MovementEvent, ShipmentStatus
 from shipment_sync.msc_browser_assisted import (
     MscBrowserCapture, consolidate_browser_statuses, status_from_browser_capture,
 )
@@ -299,6 +299,66 @@ Import Discharged from Vessel
 MSC TEST 001E
 """)
     assert client().plan_shipment_update(ship,parsed(ship,text)).task_status_update is None
+
+
+def test_rail_departure_preserves_ocean_vessel_and_repeat_projection():
+    ship = shipment(current_task_status="transit", current_field_values={"vessel-field": "MSC TEST GO637N"})
+    text = capture(events="""31/10/2026
+Kansas City, US
+Import estimated to arrive at ramp
+Bnsf - Kansas City (404)
+21/10/2026
+Long Beach, US
+Import Rail Departure
+Long Beach Pier T Terminal
+21/10/2026
+Long Beach, US
+Import Loaded on Rail
+LADEN
+Long Beach Pier T Terminal
+20/10/2026
+Long Beach, US
+Import Discharged from Vessel
+MSC TEST GO637N
+Long Beach Pier T Terminal
+""")
+    status = parsed(ship, text)
+    plan = client().plan_shipment_update(ship, status)
+    assert plan.task_status_update == "at rail"
+    assert all(u.field_id != "vessel-field" for u in plan.custom_field_updates)
+    assert all(u.label != "Gate in empty" for u in plan.custom_field_updates)
+    repeated = client().plan_shipment_update(replace(ship, current_task_status="at rail"), status)
+    assert repeated.task_status_update is None
+    assert all(u.field_id != "vessel-field" for u in repeated.custom_field_updates)
+
+
+@pytest.mark.parametrize("mode,source", [
+    ("RAIL", None), ("train", None), ("TRUCK", None), ("ROAD", None),
+    (None, "Import Rail Departure"), (None, "Import Loaded on Rail"),
+    (None, "Intermodal Departure"), (None, "Import Truck Departure"),
+])
+def test_msc_projection_rejects_legacy_inland_vessel_values(mode, source):
+    from shipment_sync.clickup_client import _latest_actual_event_vessel_voyage
+    status = ShipmentStatus("test", recent_moves=[
+        MovementEvent("Transport Departed (DEPA)", event_time=NOW,
+                      event_state="actual", vessel_voyage="Long Beach Pier T Terminal",
+                      transport_mode=mode, source_event_name=source),
+        MovementEvent("Container Discharged (DISC)", event_time=NOW-timedelta(days=1),
+                      event_state="actual", vessel_voyage="MSC TEST GO637N"),
+    ])
+    assert _latest_actual_event_vessel_voyage(status, now_utc=NOW, include_discharge=True) == "MSC TEST GO637N"
+
+
+def test_rail_only_capture_does_not_invent_a_vessel():
+    ship = shipment(current_task_status="at port", current_field_values={"vessel-field": "MSC TEST GO637N"})
+    text = capture(events="""21/10/2026
+Long Beach, US
+Import Rail Departure
+Long Beach Pier T Terminal
+""")
+    plan = client().plan_shipment_update(ship, parsed(ship, text))
+    assert plan.task_status_update is None  # No validated ocean discharge in this capture.
+    assert all(u.field_id != "vessel-field" for u in plan.custom_field_updates)
 
 
 def test_unknown_workflow_is_not_guessed():
