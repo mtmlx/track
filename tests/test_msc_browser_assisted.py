@@ -110,6 +110,33 @@ LADEN
     ]
 
 
+@pytest.mark.parametrize("description,mode", [
+    ("Import Rail Departure", "RAIL"),
+    ("Import Loaded on Rail", "RAIL"),
+    ("Import estimated to arrive at ramp", "RAIL"),
+    ("Intermodal Departure", "RAIL"),
+    ("Train Departure", "RAIL"),
+    ("Import Truck Departure", "TRUCK"),
+    ("Road Departure", "TRUCK"),
+])
+def test_inland_facility_is_not_parsed_as_a_vessel(description, mode):
+    status = status_from_browser_capture(f"""CONTAINER NUMBER: MSCU1234567
+21/10/2026
+Long Beach, US
+{description}
+Long Beach Pier T Terminal
+20/10/2026
+Long Beach, US
+Import Discharged from Vessel
+MSC TEST GO637N
+Long Beach Pier T Terminal
+""")
+    inland, ocean = status.recent_moves
+    assert inland.transport_mode == mode
+    assert inland.vessel_voyage is None
+    assert ocean.vessel_voyage == "MSC TEST GO637N"
+
+
 def test_browser_capture_without_pod_eta_uses_actual_movement_history() -> None:
     capture = """\
 CONTAINER NUMBER: MSCU5320889

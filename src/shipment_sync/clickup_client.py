@@ -1857,6 +1857,10 @@ def _latest_actual_event_vessel_voyage(
         and _move_is_effectively_actual(move, now_utc=now_utc)
         and (not include_discharge or (
             _move_is_actual(move)
+            and (move.transport_mode or "").strip().upper()
+            not in {"RAIL", "TRAIN", "TRUCK", "ROAD"}
+            and not re.search(r"\b(?:rail|ramp|intermodal|train|truck|road)\b",
+                              move.source_event_name or move.name, re.IGNORECASE)
             and _move_event_date(move) is not None
             and _move_event_date(move) <= now_utc.date()
             and (move.event_time is None or move.event_time <= now_utc)

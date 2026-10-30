@@ -470,11 +470,14 @@ def _capture_events(lines: list[str]) -> list[dict[str, str]]:
         }
         if vessel_voyage.upper() in {"EMPTY", "LADEN"}:
             event["EquipmentLoadState"] = vessel_voyage.upper()
-        if any(word in description.casefold() for word in ("rail", "ramp", "intermodal")):
+        if any(word in description.casefold() for word in ("rail", "ramp", "intermodal", "train")):
             event["TransportMode"] = "RAIL"
         elif any(word in description.casefold() for word in ("truck", "road")):
             event["TransportMode"] = "TRUCK"
-        if vessel_voyage and not _looks_like_event_description(vessel_voyage) and not _DATE_RE.fullmatch(vessel_voyage):
+        # Inland rows often omit the vessel cell, leaving a terminal name next.
+        if (not event.get("TransportMode") and vessel_voyage
+                and not _looks_like_event_description(vessel_voyage)
+                and not _DATE_RE.fullmatch(vessel_voyage)):
             event["VesselVoyage"] = vessel_voyage
             # The shared MSC event parser consumes separate vessel/voyage keys.
             # EMPTY/LADEN describe equipment state, not a transport vessel.
