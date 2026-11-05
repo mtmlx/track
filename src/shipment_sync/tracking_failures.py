@@ -81,6 +81,36 @@ def carrier_name(value: str) -> str:
     return next((name for name, aliases in groups.items() if key in aliases), 'Carrier')
 
 
+def _cma_validation_notice(error: str) -> FailureNotice | None:
+    message = error.lower()
+    if '404 client error' in message or 'cma booking lookup returned no events' in message:
+        return FailureNotice('cma_booking_not_found',
+            'CMA did not return a tracking record for the recorded booking.',
+            'The reference may have been replaced or the carrier record may be unavailable. This does not prove cancellation. We will not substitute a container\'s newer journey.',
+            ('Confirm the current carrier and booking with the booking party, including any rebooking; attach the confirmation here.',
+             'If this is still the correct CMA booking, ask integration support or CMA to recover its booking-specific history. Do not change valid container numbers or force a status.'))
+    if any(value in message for value in ('cma booking allocation mismatch', 'cma booking identity conflict',
+                                          'cma booking evidence incomplete', 'cma returned missing or conflicting container')):
+        return FailureNotice('cma_booking_identity_conflict',
+            'CMA booking evidence does not match the complete container allocation recorded on this shipment.',
+            'Missing, additional or differently booked units cannot be combined into one shipment update. Container-only history can belong to a later reuse cycle.',
+            ('Compare the recorded booking and every assigned container with the carrier-issued booking confirmation or bill of lading.',
+             'Share the confirmed allocation with integration support so it can reconcile the booking-scoped response. Do not remove real units or reduce the quantity to bypass validation.'))
+    if 'cma returned no shared port-validated movement evidence' in message:
+        return FailureNotice('cma_movement_evidence_conflict',
+            'CMA returned container histories, but no common port-validated shipment milestone could be established for every unit.',
+            'A container may be showing a later reuse journey, or the original booking history may be incomplete. Combining those movements could assign another shipment\'s dates, vessel or status here.',
+            ('Ask integration support to review each container against this booking\'s complete event history and confirmed POD.',
+             'Provide the booking confirmation or bill of lading and the carrier booking result. Keep correct references and existing dates unchanged until the journey evidence is reconciled.'))
+    if 'cma container list does not match' in message:
+        return FailureNotice('cma_container_count_conflict',
+            'The recorded container list does not match Number of Containers.',
+            'Tracking cannot validate the complete shipment while its allocation and quantity disagree.',
+            ('Verify the complete allocation against the booking confirmation or bill of lading.',
+             'Correct only evidence-supported references or quantity. Never delete real units to bypass the check.'))
+    return None
+
+
 def source_url(shipment: ShipmentRef) -> str | None:
     carrier = carrier_name(shipment.shipping_line)
     if carrier == 'ONE':
@@ -144,6 +174,10 @@ def classify_failure(shipment: ShipmentRef, error: str, *, phase: str = 'lookup'
             'No reliable result was obtained through this access path. Changing shipment data cannot resolve an anti-bot restriction.', tuple(actions))
     if carrier_name(shipment.shipping_line) == 'MSC':
         specific = _msc_validation_notice(shipment, error)
+        if specific is not None:
+            return specific
+    if carrier_name(shipment.shipping_line) == 'CMA CGM':
+        specific = _cma_validation_notice(error)
         if specific is not None:
             return specific
     if any(s in message for s in ('destination', 'port of discharge', 'pod ', 'port evidence')):

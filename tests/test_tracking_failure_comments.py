@@ -58,6 +58,24 @@ def test_raw_errors_and_credentials_are_never_copied_into_task_comments(monkeypa
     assert 'not proof that the booking is invalid' in text
 
 
+@pytest.mark.parametrize('error,category',[
+    ('404 Client Error: Not Found for url: https://api.test?secret=PRIVATE','cma_booking_not_found'),
+    ('CMA booking lookup returned no events; container-only fallback refused','cma_booking_not_found'),
+    ('CMA booking allocation mismatch: missing containers: FAKE1234567','cma_booking_identity_conflict'),
+    ('CMA booking identity conflict: response contains a different or mixed booking scope','cma_booking_identity_conflict'),
+    ('CMA returned no shared port-validated movement evidence for all containers','cma_movement_evidence_conflict'),
+    ("CMA container list does not match the shipment's expected container count",'cma_container_count_conflict'),
+])
+def test_cma_failures_explain_booking_and_reuse_evidence_without_raw_errors(error,category):
+    ref=shipment();ref.shipping_line='cma - cgm'
+    notice=classify_failure(ref,error)
+    assert notice.category==category
+    text=failure_comment(ref,notice,method='automated carrier adapter',phase='lookup')
+    assert 'PRIVATE' not in text and 'api.test' not in text and 'FAKE1234567' not in text
+    assert 'ISSUE:' in text and 'CORRECTIVE ACTION' in text
+    assert 'This failed lookup did not write shipment fields' in text
+
+
 @pytest.mark.parametrize('change', ['carrier', 'count', 'checked', 'terminal', 'booking', 'destination'])
 def test_stale_failures_do_not_notify_after_task_changes(monkeypatch, change):
     client, task, _, posts, _ = conflict_client(monkeypatch)

@@ -166,6 +166,8 @@ class CmaCgmAdapter(CarrierAdapter):
         references = _container_references(shipment.container_no)
         if shipment.expected_container_count and len(references) != shipment.expected_container_count:
             raise ValueError("CMA container list does not match the shipment's expected container count")
+        if shipment.booking_no:
+            return self._fetch_booking_container_statuses(shipment, references)
         statuses = []
         for reference in references:
             fetched = self._fetch_dcsa_event_pages(replace(shipment, container_no=reference))
@@ -175,6 +177,32 @@ class CmaCgmAdapter(CarrierAdapter):
             )
             if set(status.discovered_containers) != {reference} or not status.recent_moves:
                 raise ValueError(f"CMA returned missing or conflicting container evidence for {reference}")
+            statuses.append(_bind_destination(status, shipment.destination_port))
+        return _consolidate_containers(shipment, references, statuses)
+
+    def _fetch_booking_container_statuses(self, shipment: ShipmentRef, references: list[str]) -> ShipmentStatus:
+        fetched = self._fetch_dcsa_event_pages(replace(shipment, container_no=None))
+        events = list(fetched.events)
+        booking_ids = _validate_booking_allocation(events, shipment.booking_no, references)
+        transport_scopes = [_transport_equipment_scope(event) for event in events]
+        if any(scope - set(references) for scope in transport_scopes):
+            raise ValueError('CMA booking identity conflict: transport references an unexpected container')
+        statuses = []
+        for reference in references:
+            # Equipment-only lookup can switch to a reused container's next cycle.
+            # Shared transport calls must belong to this response's booking scope.
+            scoped = [event for event, scope in zip(events, transport_scopes) if event.get('equipmentReference') == reference or (
+                not event.get('equipmentReference') and event.get('eventType') == 'TRANSPORT'
+                and booking_ids and _booking_document_ids(event) == booking_ids
+                and (not scope or reference in scope))]
+            status = self._status_from_payload(
+                payload={'events': scoped}, source=f'cma-api:{fetched.source_url}',
+                source_url=_build_source_url(self.url_template, shipment.booking_no, self.booking_type_code),
+            )
+            scoped_units = {event['equipmentReference'] for event in scoped if event.get('equipmentReference')}
+            if scoped_units != {reference} or not status.recent_moves:
+                raise ValueError(f'CMA booking evidence incomplete for container {reference}')
+            status.discovered_containers = [reference]
             statuses.append(_bind_destination(status, shipment.destination_port))
         return _consolidate_containers(shipment, references, statuses)
 
@@ -734,6 +762,54 @@ def _bind_destination(status: ShipmentStatus, destination: str | None) -> Shipme
                    eta_local_text=arrival.event_time_local_text if arrival else None,
                    vessel_voyage=arrival.vessel_voyage if arrival else None,
                    final_vessel_voyage=arrival.vessel_voyage if arrival else None)
+
+
+def _booking_document_ids(event: dict[str, Any]) -> set[str]:
+    documents = event.get('documentReferences') or []
+    if not isinstance(documents, list):
+        raise ValueError('CMA booking identity conflict: malformed document references')
+    return {str(item.get('documentReferenceValue') or '').strip()
+            for item in documents if isinstance(item, dict)
+            and item.get('documentReferenceType') == 'BKG' and item.get('documentReferenceValue')}
+
+
+def _transport_equipment_scope(event: dict[str, Any]) -> set[str]:
+    if event.get('eventType') != 'TRANSPORT' or event.get('equipmentReference'):
+        return set()
+    references = event.get('references') or []
+    if not isinstance(references, list):
+        raise ValueError('CMA booking identity conflict: malformed transport equipment scope')
+    scope = set()
+    for item in references:
+        if not isinstance(item, dict) or item.get('referenceType') != 'EQ':
+            continue
+        value = str(item.get('referenceValue') or '').strip().upper()
+        if not re.fullmatch(r'[A-Z]{4}\d{7}', value):
+            raise ValueError('CMA booking identity conflict: malformed transport equipment scope')
+        scope.add(value)
+    return scope
+
+
+def _validate_booking_allocation(events: list[dict[str, Any]], booking: str,
+                                 references: list[str]) -> set[str]:
+    if not events:
+        raise ValueError('CMA booking lookup returned no events; container-only fallback refused')
+    booking_ids = set().union(*(_booking_document_ids(event) for event in events))
+    # CMA returns opaque 64-character booking IDs as well as literal references.
+    # Never decode or treat those opaque IDs as a different visible booking.
+    if len(booking_ids) > 1 or any(
+        value.upper() != _normalize_reference(booking).upper() and not re.fullmatch(r'[0-9a-fA-F]{64}', value)
+        for value in booking_ids
+    ):
+        raise ValueError('CMA booking identity conflict: response contains a different or mixed booking scope')
+    population = {str(event['equipmentReference']).strip().upper() for event in events
+                  if event.get('equipmentReference')}
+    expected = set(references)
+    if population != expected:
+        missing = ', '.join(sorted(expected - population)) or 'none'
+        unexpected = ', '.join(sorted(population - expected)) or 'none'
+        raise ValueError(f'CMA booking allocation mismatch: missing containers: {missing}; unexpected containers: {unexpected}')
+    return booking_ids
 
 
 def _consolidate_containers(shipment: ShipmentRef, references: list[str], statuses: list[ShipmentStatus]) -> ShipmentStatus:
