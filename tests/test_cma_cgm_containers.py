@@ -248,3 +248,27 @@ def test_booking_anchor_rejects_invalid_allocation_before_carrier_lookup(monkeyp
     a,called=booking_adapter(monkeypatch)
     with pytest.raises(ValueError):a.fetch_status(shipment(booking_no='BOOK-1',expected_container_count=3))
     assert called==[]
+
+
+def test_single_unit_eq_transport_cannot_complete_all_container_milestone(monkeypatch):
+    def transform(values):
+        for v in values:
+            if v['eventType']=='TRANSPORT':
+                v.pop('equipmentReference')
+                v['references']=[{'referenceType':'EQ','referenceValue':'CMAU1234567'}]
+        return values
+    a,_=booking_adapter(monkeypatch,transform)
+    status=a.fetch_status(shipment(booking_no='BOOK-1'))
+    assert status.eta_time is None
+    assert not any(m.name.endswith(('(DEPA)','(ARRI)')) for m in status.recent_moves)
+
+
+@pytest.mark.parametrize('value',['OTHER1234567','not assigned',''])
+def test_invalid_or_foreign_transport_eq_scope_is_rejected(monkeypatch,value):
+    def transform(values):
+        v=values[3];v.pop('equipmentReference')
+        v['references']=[{'referenceType':'EQ','referenceValue':value}]
+        return values
+    a,_=booking_adapter(monkeypatch,transform)
+    with pytest.raises(ValueError,match='CMA booking identity conflict'):
+        a.fetch_status(shipment(booking_no='BOOK-1'))

@@ -184,13 +184,17 @@ class CmaCgmAdapter(CarrierAdapter):
         fetched = self._fetch_dcsa_event_pages(replace(shipment, container_no=None))
         events = list(fetched.events)
         booking_ids = _validate_booking_allocation(events, shipment.booking_no, references)
+        transport_scopes = [_transport_equipment_scope(event) for event in events]
+        if any(scope - set(references) for scope in transport_scopes):
+            raise ValueError('CMA booking identity conflict: transport references an unexpected container')
         statuses = []
         for reference in references:
             # Equipment-only lookup can switch to a reused container's next cycle.
             # Shared transport calls must belong to this response's booking scope.
-            scoped = [event for event in events if event.get('equipmentReference') == reference or (
+            scoped = [event for event, scope in zip(events, transport_scopes) if event.get('equipmentReference') == reference or (
                 not event.get('equipmentReference') and event.get('eventType') == 'TRANSPORT'
-                and booking_ids and _booking_document_ids(event) == booking_ids)]
+                and booking_ids and _booking_document_ids(event) == booking_ids
+                and (not scope or reference in scope))]
             status = self._status_from_payload(
                 payload={'events': scoped}, source=f'cma-api:{fetched.source_url}',
                 source_url=_build_source_url(self.url_template, shipment.booking_no, self.booking_type_code),
@@ -767,6 +771,23 @@ def _booking_document_ids(event: dict[str, Any]) -> set[str]:
     return {str(item.get('documentReferenceValue') or '').strip()
             for item in documents if isinstance(item, dict)
             and item.get('documentReferenceType') == 'BKG' and item.get('documentReferenceValue')}
+
+
+def _transport_equipment_scope(event: dict[str, Any]) -> set[str]:
+    if event.get('eventType') != 'TRANSPORT' or event.get('equipmentReference'):
+        return set()
+    references = event.get('references') or []
+    if not isinstance(references, list):
+        raise ValueError('CMA booking identity conflict: malformed transport equipment scope')
+    scope = set()
+    for item in references:
+        if not isinstance(item, dict) or item.get('referenceType') != 'EQ':
+            continue
+        value = str(item.get('referenceValue') or '').strip().upper()
+        if not re.fullmatch(r'[A-Z]{4}\d{7}', value):
+            raise ValueError('CMA booking identity conflict: malformed transport equipment scope')
+        scope.add(value)
+    return scope
 
 
 def _validate_booking_allocation(events: list[dict[str, Any]], booking: str,
