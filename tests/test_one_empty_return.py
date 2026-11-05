@@ -101,3 +101,57 @@ def test_adapter_preserves_explicit_return_and_location_code(monkeypatch):
     fetched = adapter.fetch_status(shipment)
     assert fetched.destination_port == shipment.destination_port
     assert fetched.require_destination_evidence is True
+
+
+@pytest.mark.parametrize("offset", [-3, 0, 3])
+@pytest.mark.parametrize("current", ["arribado en puerto", "en almacén"])
+def test_saved_gate_dates_never_replace_actual_events(offset, current):
+    shipment, status = evidence()
+    shipment.current_task_status = current
+    saved = datetime.now(timezone.utc) + timedelta(days=offset)
+    shipment.current_field_values.update({"gtot-delivery-field": saved, "gtin-empty-field": saved})
+    status.recent_moves = status.recent_moves[:4]
+    for _ in range(2):
+        result = plan(shipment, status)
+        assert result.task_status_update is None
+        assert not any(w.field_id in {"gtot-delivery-field", "gtin-empty-field"}
+                       for w in result.custom_field_updates)
+
+
+@pytest.mark.parametrize("change", [
+    {"event_state": "estimated"}, {"event_state": None}, {"event_time": None},
+    {"event_time": datetime.now(timezone.utc)+timedelta(days=1)},
+    {"location_code": "MXZLO"}, {"location_code": "AMBIGUOUS"},
+    {"location_code": None, "location": None},
+    {"equipment_load_state": "EMPTY"}, {"equipment_load_state": None},
+    {"event_time": datetime.now(timezone.utc)-timedelta(days=12)},
+    {},
+])
+def test_delivery_requires_actual_laden_gate_at_destination_after_discharge(change):
+    shipment, status = evidence()
+    gate = MovementEvent("Container Gated Out (GTOT)", "PUERTO QUETZAL",
+        datetime.now(timezone.utc)-timedelta(days=1), event_state="actual",
+        location_code="GTPRQ", equipment_load_state="LADEN")
+    status.recent_moves = status.recent_moves[:4] + [replace(gate, **change)]
+    result = plan(shipment, status)
+    valid = not change
+    assert result.task_status_update == ("en ruta a almacén" if valid else None)
+    assert any(w.field_id == "gtot-delivery-field" for w in result.custom_field_updates) == valid
+
+
+def test_return_rejects_contradictory_laden_state_even_with_saved_date():
+    shipment, status = evidence()
+    shipment.current_task_status = "en almacén"
+    shipment.current_field_values["gtin-empty-field"] = datetime.now(timezone.utc)-timedelta(days=1)
+    status.recent_moves[-1] = replace(status.recent_moves[-1], equipment_load_state="LADEN")
+    result = plan(shipment, status)
+    assert result.task_status_update is None
+    assert not any(w.field_id == "gtin-empty-field" for w in result.custom_field_updates)
+
+
+def test_gate_validator_rejects_naive_timestamp():
+    from shipment_sync.clickup_client import _verified_one_destination_gate
+    _, status = evidence()
+    gate = MovementEvent("Container Gated Out (GTOT)", "PUERTO QUETZAL",
+        datetime.now(), event_state="actual", location_code="GTPRQ", equipment_load_state="LADEN")
+    assert not _verified_one_destination_gate(status, gate, datetime.now(timezone.utc))

@@ -1332,6 +1332,12 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
                 and (_event_code_from_move(move) != "GTIN" or status.all_containers_empty_returned is True)
                 and move.equipment_load_state == {"GTIN": "EMPTY", "GTOT": "LADEN"}[_event_code_from_move(move)])]
 
+    if carrier_name(shipping_line) == "ONE":
+        now_utc = datetime.now(timezone.utc)
+        post_discharge_moves = [move for move in post_discharge_moves
+            if _event_code_from_move(move) not in {"GTIN", "GTOT"}
+            or _verified_one_destination_gate(status, move, now_utc)]
+
     updates.extend(
         _build_move_field_updates(
             moves=pre_discharge_moves,
@@ -1632,6 +1638,19 @@ def _derive_operational_status_step(
                 and _carrier_booking_allows_confirmation(shipment, status)):
             return "booking_confirmed"
         return None
+
+    if carrier_name(shipment.shipping_line) == "ONE":
+        # Saved operational plans are not evidence of physical delivery/return.
+        moves = _order_moves_ascending(status.recent_moves)
+        discharge_index = _validated_destination_discharge_index(status, moves)
+        gates = [] if discharge_index is None else [
+            move for move in moves[discharge_index + 1:]
+            if _verified_one_destination_gate(status, move, now_utc)
+        ]
+        gate_out_delivery_date = next((_move_event_date(move) for move in gates
+            if _event_code_from_move(move) == "GTOT"), None)
+        gate_in_empty_date = next((_move_event_date(move) for move in gates
+            if _event_code_from_move(move) == "GTIN"), None)
 
     strict_one_origin = status.raw_source == "https://apix.one-line.com/v2/events"
     actual_origin_codes = set()
@@ -2160,16 +2179,26 @@ def _has_verified_one_empty_return(
     discharge_index = _validated_destination_discharge_index(status, moves)
     if discharge_index is None:
         return False
-    return any(
-        move.source_event_name == "Empty Container Returned from Customer"
-        and _event_code_from_move(move) == "GTIN"
-        and move.event_state == "actual"
-        and move.event_time is not None
-        and move.event_time.tzinfo is not None
-        and move.event_time <= now_utc
-        and _move_at_destination(status, move)
-        for move in moves[discharge_index + 1:]
-    )
+    return any(_event_code_from_move(move) == "GTIN"
+        and _verified_one_destination_gate(status, move, now_utc)
+        for move in moves[discharge_index + 1:])
+
+
+def _verified_one_destination_gate(
+    status: ShipmentStatus, move: MovementEvent, now_utc: datetime,
+) -> bool:
+    code = _event_code_from_move(move)
+    if (not status.require_destination_evidence or code not in {"GTOT", "GTIN"}
+            or _normalize_event_state(move.event_state) != "actual"
+            or move.event_time is None or move.event_time.tzinfo is None
+            or move.event_time > now_utc or not _move_at_destination(status, move)):
+        return False
+    if code == "GTIN":
+        return (move.source_event_name == "Empty Container Returned from Customer"
+                and move.equipment_load_state in {None, "EMPTY"})
+    return (move.equipment_load_state == "LADEN"
+            or (move.equipment_load_state is None and move.source_event_name ==
+                "Gate Out from Inbound Terminal for Delivery to Consignee (or Port Shuttle)"))
 
 
 def _find_destination_discharge_index(moves: list[MovementEvent]) -> int | None:
