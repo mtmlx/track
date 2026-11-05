@@ -1,3 +1,4 @@
+# Superseded base-files pin refreshed from Ubuntu resolute-updates on 2026-11-05.
 # Brotli security pins refreshed for USN-8956-1 on 2026-10-27.
 # Superseded pins refreshed from signed Ubuntu amd64 indexes on 2026-10-01.
 # Ubuntu 26.04 updates verified from signed distribution indexes on 2026-09-07.
@@ -9,7 +10,7 @@
 # libX11 security pins refreshed for USN-8913-1 on 2026-10-12.
 # zlib security pin refreshed for USN-8954-1 on 2026-10-23.
 at-spi2-common=2.60.4-0ubuntu0.1
-base-files=14ubuntu6.2
+base-files=14ubuntu6.3
 brotli=1.2.0-3ubuntu0.1
 bsdutils=1:2.41.3-3ubuntu2.2
 bubblewrap=0.11.1-1ubuntu0.3
