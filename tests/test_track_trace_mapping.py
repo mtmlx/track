@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from shipment_sync.clickup_client import ClickUpClient
@@ -1158,7 +1159,7 @@ def test_plan_shipment_update_does_not_move_arriving_to_arrived_when_eta_passes(
     assert plan.task_status_update is None
 
 
-def test_plan_shipment_update_moves_arrived_to_en_route_after_gate_out_delivery() -> None:
+def test_one_saved_gate_out_delivery_cannot_move_arrived_to_en_route() -> None:
     client = ClickUpClient(_settings(clickup_use_task_status=True))
     shipment = ShipmentRef(
         task_id="task-status-route",
@@ -1174,10 +1175,10 @@ def test_plan_shipment_update_moves_arrived_to_en_route_after_gate_out_delivery(
 
     plan = client.plan_shipment_update(shipment, status)
 
-    assert plan.task_status_update == "en ruta a almacén"
+    assert plan.task_status_update is None
 
 
-def test_plan_shipment_update_moves_warehouse_to_empty_returned_after_gate_in_empty() -> None:
+def test_one_saved_gate_in_empty_cannot_close_warehouse_shipment() -> None:
     client = ClickUpClient(_settings(clickup_use_task_status=True))
     shipment = ShipmentRef(
         task_id="task-status-empty",
@@ -1193,7 +1194,7 @@ def test_plan_shipment_update_moves_warehouse_to_empty_returned_after_gate_in_em
 
     plan = client.plan_shipment_update(shipment, status)
 
-    assert plan.task_status_update == "Vacío devuelto"
+    assert plan.task_status_update is None
 
 
 def test_plan_shipment_update_does_not_change_status_after_empty_returned() -> None:
@@ -1941,8 +1942,16 @@ def test_plan_shipment_update_uses_final_discharge_after_transshipment() -> None
         ],
     )
 
+    shipment.destination_port = "LAZARO CARDENAS MX"
+    status.destination_port = shipment.destination_port
+    status.require_destination_evidence = True
+    status.recent_moves = [replace(move, location="LAZARO CARDENAS MX")
+                           if move.location == "LAZARO CARDENAS" else move
+                           for move in status.recent_moves]
+    status.recent_moves[-2] = replace(status.recent_moves[-2], equipment_load_state="LADEN")
+    status.recent_moves[-1] = replace(status.recent_moves[-1], equipment_load_state="EMPTY",
+                                    source_event_name="Empty Container Returned from Customer")
     plan = client.plan_shipment_update(shipment, status)
-
     updates = {update.label: update for update in plan.custom_field_updates}
     assert updates["Discharge date"].value.date().isoformat() == "2026-04-01"
     assert updates["Gate out delivery"].value.date().isoformat() == "2026-04-02"
@@ -1962,6 +1971,8 @@ def test_plan_shipment_update_ignores_untimed_discharge_placeholder_after_destin
     )
     status = ShipmentStatus(
         status_text="ETA 2026-08-11T03:43:00+00:00",
+        destination_port="GTPRQ",
+        require_destination_evidence=True,
         recent_moves=[
             MovementEvent(
                 name="Container Discharged (DISC)",
@@ -1974,12 +1985,15 @@ def test_plan_shipment_update_ignores_untimed_discharge_placeholder_after_destin
                 location="PUERTO QUETZAL",
                 event_time=datetime(2026, 8, 18, 16, 34, tzinfo=timezone.utc),
                 event_state="actual",
+                equipment_load_state="LADEN",
             ),
             MovementEvent(
                 name="Container Gated In (GTIN)",
                 location="PUERTO QUETZAL",
                 event_time=datetime(2026, 8, 18, 22, 34, tzinfo=timezone.utc),
                 event_state="actual",
+                equipment_load_state="EMPTY",
+                source_event_name="Empty Container Returned from Customer",
             ),
             MovementEvent(
                 name="Container Discharged (DISC)",
