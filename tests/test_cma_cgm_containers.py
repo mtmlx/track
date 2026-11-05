@@ -10,7 +10,7 @@ from test_track_trace_mapping import _settings
 
 
 def shipment(**changes):
-    return replace(ShipmentRef('task-cma','Synthetic CMA shipment','cma cgm','BOOK-1',
+    return replace(ShipmentRef('task-cma','Synthetic CMA shipment','cma cgm',None,
                    'CMAU-123456-7, TGHU-765432-1','list-1',expected_container_count=2,
                    destination_port='Alexandria, Egipto',current_task_status='tránsito'),**changes)
 
@@ -91,7 +91,7 @@ def test_invalid_container_does_not_fall_back_to_booking(value,monkeypatch):
 
 
 def test_booking_reference_keeps_its_hyphens():
-    assert _pick_reference(shipment(container_no=None),'booking','container')==('BOOK-1','booking')
+    assert _pick_reference(shipment(container_no=None,booking_no='BOOK-1'),'booking','container')==('BOOK-1','booking')
 
 
 @pytest.mark.parametrize('problem',['missing','wrong_container','count'])
@@ -152,3 +152,99 @@ def test_unverified_unit_cannot_complete_destination_discharge(monkeypatch):
     assert not any(m.name.endswith('(DISC)') for m in status.recent_moves)
     plan=ClickUpClient(_settings()).plan_shipment_update(shipment(),status)
     assert all(u.field_id!='disc-field' for u in plan.custom_field_updates)
+
+
+def booking_adapter(monkeypatch, transform=lambda values: values):
+    a=CmaCgmAdapter()
+    monkeypatch.setattr(a,'_api_mode_requested',lambda:True)
+    called=[]
+    def fetch(ship):
+        called.append((ship.booking_no,ship.container_no))
+        assert ship.container_no is None, 'must not query a reused container cycle'
+        values=events('CMAU1234567')+events('TGHU7654321')
+        for value in values:
+            value['documentReferences']=[{'documentReferenceType':'BKG','documentReferenceValue':'BOOK-1'}]
+        values=transform(values)
+        return CmaCgmDcsaEventFetch({'events':values},tuple(values),'https://api.example.test/events',2)
+    monkeypatch.setattr(a,'_fetch_dcsa_event_pages',fetch)
+    return a,called
+
+
+def test_booking_anchor_prevents_reused_container_journeys_and_is_idempotent(monkeypatch):
+    a,called=booking_adapter(monkeypatch)
+    ship=shipment(booking_no='BOOK-1')
+    status=a.fetch_status(ship)
+    assert called==[('BOOK-1',None)]
+    assert status.discovered_containers==['CMAU1234567','TGHU7654321']
+    assert status.final_vessel_voyage=='CMA FINAL 001E'
+    assert status.source_url.endswith('/BOOK-1')
+    assert status.require_destination_evidence
+    client=ClickUpClient(_settings(clickup_use_task_status=True))
+    plan=client.plan_shipment_update(ship,status)
+    assert plan.task_status_update is None
+    current=dict(ship.current_field_values)
+    current.update({u.field_id:u.value for u in plan.custom_field_updates})
+    repeat=client.plan_shipment_update(replace(ship,current_field_values=current),status)
+    assert not repeat.task_status_update
+    assert all(u.field_id=='last-checked-field' for u in repeat.custom_field_updates)
+
+
+@pytest.mark.parametrize('problem',['empty','missing','extra','different_booking','mixed_opaque'])
+def test_booking_scope_failures_never_fall_back_to_container_queries(monkeypatch,problem):
+    def transform(values):
+        if problem=='empty':return []
+        if problem=='missing':return [v for v in values if v['equipmentReference']!='TGHU7654321']
+        if problem=='extra':return values+[event('OTHER1234567','LOAD')]
+        if problem=='different_booking':values[0]['documentReferences'][0]['documentReferenceValue']='OTHER-BOOKING'
+        if problem=='mixed_opaque':
+            for i,v in enumerate(values):v['documentReferences'][0]['documentReferenceValue']=('a' if i%2 else 'b')*64
+        return values
+    a,called=booking_adapter(monkeypatch,transform)
+    with pytest.raises(ValueError,match='CMA booking'):
+        a.fetch_status(shipment(booking_no='BOOK-1'))
+    assert called==[('BOOK-1',None)]
+
+
+def test_shared_transport_calls_require_consistent_booking_scope(monkeypatch):
+    def transform(values):
+        for v in values:
+            v['documentReferences'][0]['documentReferenceValue']='a'*64
+            if v['eventType']=='TRANSPORT':
+                v.pop('equipmentReference')
+                v['references']=[{'referenceType':'EQ','referenceValue':'CMAU1234567'},
+                                 {'referenceType':'EQ','referenceValue':'TGHU7654321'}]
+        return values
+    a,_=booking_adapter(monkeypatch,transform)
+    status=a.fetch_status(shipment(booking_no='BOOK-1'))
+    assert status.final_vessel_voyage=='CMA FINAL 001E'
+    assert status.eta_local_text=='2099-12-05T07:00:00+02:00'
+
+
+def test_unscoped_transport_calls_cannot_invent_eta(monkeypatch):
+    def transform(values):
+        for v in values:
+            if v['eventType']=='TRANSPORT':
+                v.pop('equipmentReference');v.pop('documentReferences')
+        return values
+    a,_=booking_adapter(monkeypatch,transform)
+    status=a.fetch_status(shipment(booking_no='BOOK-1'))
+    assert status.eta_time is None
+    assert not any(m.name.endswith('(ARRI)') for m in status.recent_moves)
+
+
+def test_booking_anchor_preserves_actual_only_multi_unit_discharge(monkeypatch):
+    def transform(values):
+        for ref,cl in [('CMAU1234567','ACT'),('TGHU7654321','PLN')]:
+            v=event(ref,'DISC',cl,'EGALY')
+            v['documentReferences']=[{'documentReferenceType':'BKG','documentReferenceValue':'BOOK-1'}]
+            values.append(v)
+        return values
+    a,_=booking_adapter(monkeypatch,transform)
+    status=a.fetch_status(shipment(booking_no='BOOK-1'))
+    assert not any(m.name.endswith('(DISC)') for m in status.recent_moves)
+
+
+def test_booking_anchor_rejects_invalid_allocation_before_carrier_lookup(monkeypatch):
+    a,called=booking_adapter(monkeypatch)
+    with pytest.raises(ValueError):a.fetch_status(shipment(booking_no='BOOK-1',expected_container_count=3))
+    assert called==[]
