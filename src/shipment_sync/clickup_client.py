@@ -1674,6 +1674,9 @@ def _derive_operational_status_step(
             etd_date = None
 
     target_step: str | None = None
+    is_cma = carrier_name(shipment.shipping_line) == "CMA CGM"
+    cma_has_actual_transit = not is_cma or _has_actual_cma_vessel_transit(
+        shipment, status, now_utc=now_utc)
     browser_has_actual_transit = status.raw_source != "msc-browser-assisted:capture" or any(
         _event_code_from_move(move) in {"LOAD", "DEPA"}
         and _move_is_actual(move)
@@ -1712,7 +1715,7 @@ def _derive_operational_status_step(
     # A confirmed feeder-barge leg is operational transit. Carrier feeds do not
     # reliably expose the origin gate events for these moves, so do not block
     # this transition on manually maintained gate fields.
-    if eta_date is not None and eta_date > today and _has_origin_barge_transit_move(
+    if cma_has_actual_transit and eta_date is not None and eta_date > today and _has_origin_barge_transit_move(
         shipment=shipment,
         status=status,
         settings=settings,
@@ -1741,13 +1744,18 @@ def _derive_operational_status_step(
         if near_arrival_min_days <= (eta_date - today).days <= 10:
             target_step = _max_workflow_step(target_step, "arriving")
 
+    if is_cma and cma_has_actual_transit and eta_date is not None and eta_date > today:
+        target_step = _max_workflow_step(target_step, "in_transit")
+        if near_arrival_min_days <= (eta_date - today).days <= 10:
+            target_step = _max_workflow_step(target_step, "arriving")
+
     if gate_out_empty_date is not None and gate_in_full_date is None:
         target_step = _max_workflow_step(target_step, "collected")
 
     if gate_out_empty_date is not None and gate_in_full_date is not None and etd_date is not None:
         if etd_date > today:
             target_step = _max_workflow_step(target_step, "origin_port")
-            if eta_date is not None and eta_date > today and _has_origin_barge_transit_move(
+            if cma_has_actual_transit and eta_date is not None and eta_date > today and _has_origin_barge_transit_move(
                 shipment=shipment,
                 status=status,
                 settings=settings,
@@ -1759,11 +1767,16 @@ def _derive_operational_status_step(
                 days_until_eta = (eta_date - today).days
                 if near_arrival_min_days <= days_until_eta <= 10:
                     target_step = _max_workflow_step(target_step, "arriving")
-        elif eta_date is not None and eta_date > today and browser_has_actual_transit:
+        elif eta_date is not None and eta_date > today and browser_has_actual_transit and cma_has_actual_transit:
             target_step = _max_workflow_step(target_step, "in_transit")
             days_until_eta = (eta_date - today).days
             if near_arrival_min_days <= days_until_eta <= 10:
                 target_step = _max_workflow_step(target_step, "arriving")
+
+        elif is_cma:
+            # Actual gates establish terminal readiness, never sailing. Keep
+            # the origin milestone when the carrier rolls a forecast ETD.
+            target_step = _max_workflow_step(target_step, "origin_port")
 
     if discharge_date is not None and (
         not status.require_destination_evidence
@@ -2535,6 +2548,38 @@ def _has_actual_maersk_vessel_transit(status: ShipmentStatus, *, now_utc: dateti
         and not _move_at_destination(status, move)
         for move in status.recent_moves
     )
+
+
+def _has_actual_cma_vessel_transit(
+    shipment: ShipmentRef, status: ShipmentStatus, *, now_utc: datetime,
+) -> bool:
+    destination = shipment.destination_port
+    if not same_port(destination, destination):
+        return False
+    # CMA's adapter intersects physical events across all validated containers;
+    # use that common evidence, not gates or a saved departure forecast.
+    for move in status.recent_moves:
+        occurrence = move.event_occurrence_time
+        if (_event_code_from_move(move) not in {"LOAD", "DEPA"}
+                or not _move_is_actual(move)
+                or move.transport_mode not in {"VESSEL", "BARGE"}
+                or occurrence is None or occurrence.tzinfo is None or occurrence > now_utc
+                or not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}", move.location_code or "")
+                or same_port(destination, move.location_code)
+                or not move.vessel_voyage or _is_voyage_only(move.vessel_voyage)
+                or move.equipment_load_state == "EMPTY"):
+            continue
+        if move.event_time_local_text is not None:
+            if not isinstance(move.event_time_local_text, str):
+                continue
+            try:
+                local = datetime.fromisoformat(move.event_time_local_text.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            if local.tzinfo is None:
+                continue
+        return True
+    return False
 
 
 def _move_is_effectively_actual(move: MovementEvent, *, now_utc: datetime) -> bool:
