@@ -784,7 +784,7 @@ class ClickUpClient:
         if container_update is not None:
             candidate_field_updates.append(container_update)
         candidate_field_updates.extend(_build_direct_event_field_updates(
-            status=status, settings=self.settings, shipping_line=shipment.shipping_line))
+            status=status, settings=self.settings, shipment=shipment))
         effective_field_values = _effective_field_values(
             shipment.current_field_values,
             candidate_field_updates,
@@ -1266,8 +1266,9 @@ def _expected_container_count(custom_fields: Any) -> int | None:
 
 
 def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Settings,
-                                      shipping_line: str = "") -> list[ShipmentFieldWrite]:
+                                      shipment: ShipmentRef) -> list[ShipmentFieldWrite]:
     updates: list[ShipmentFieldWrite] = []
+    shipping_line = shipment.shipping_line
 
     eta_value = _coerce_display_date(status.eta_local_text, status.eta_time)
     if settings.cf_eta and eta_value is not None:
@@ -1336,7 +1337,9 @@ def _build_direct_event_field_updates(*, status: ShipmentStatus, settings: Setti
         now_utc = datetime.now(timezone.utc)
         post_discharge_moves = [move for move in post_discharge_moves
             if _event_code_from_move(move) not in {"GTIN", "GTOT"}
-            or _verified_one_destination_gate(status, move, now_utc)]
+            or (_verified_one_destination_gate(status, move, now_utc)
+                and (_event_code_from_move(move) != "GTIN"
+                     or _one_empty_return_population_verified(shipment, status)))]
 
     updates.extend(
         _build_move_field_updates(
@@ -1649,8 +1652,10 @@ def _derive_operational_status_step(
         ]
         gate_out_delivery_date = next((_move_event_date(move) for move in gates
             if _event_code_from_move(move) == "GTOT"), None)
-        gate_in_empty_date = next((_move_event_date(move) for move in gates
-            if _event_code_from_move(move) == "GTIN"), None)
+        gate_in_empty_date = max((_move_event_date(move) for move in gates
+            if _event_code_from_move(move) == "GTIN"), default=None) if (
+                _one_empty_return_population_verified(shipment, status)
+            ) else None
 
     strict_one_origin = status.raw_source == "https://apix.one-line.com/v2/events"
     actual_origin_codes = set()
@@ -2183,10 +2188,23 @@ def _move_at_destination(status: ShipmentStatus, move: MovementEvent) -> bool:
     return same_port(status.destination_port, move.location_code or move.location)
 
 
+def _one_empty_return_population_verified(shipment: ShipmentRef, status: ShipmentStatus) -> bool:
+    recorded = set(_container_tokens_from_value(shipment.container_no))
+    verified = {token for value in status.discovered_containers
+                for token in _container_tokens_from_value(value)}
+    expected = shipment.expected_container_count
+    if len(recorded | verified) <= 1 and (expected is None or expected <= 1):
+        return True
+    return (status.all_containers_empty_returned is True and len(verified) > 1
+            and recorded.issubset(verified)
+            and (expected is None or len(verified) == expected))
+
+
 def _has_verified_one_empty_return(
     shipment: ShipmentRef, status: ShipmentStatus, now_utc: datetime,
 ) -> bool:
-    if shipment.shipping_line.strip().lower() != "one" or not status.require_destination_evidence:
+    if (shipment.shipping_line.strip().lower() != "one" or not status.require_destination_evidence
+            or not _one_empty_return_population_verified(shipment, status)):
         return False
     moves = _order_moves_ascending(status.recent_moves)
     discharge_index = _validated_destination_discharge_index(status, moves)

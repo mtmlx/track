@@ -32,6 +32,25 @@ def evidence():
 def plan(shipment, status):
     return ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(shipment, status)
 
+@pytest.mark.parametrize("verified, population, closes", [
+    (None, ["TIIU7491493", "TIIU7491683"], False),
+    (False, ["TIIU7491493", "TIIU7491683"], False),
+    (True, ["TIIU7491493"], False),
+    (True, ["TIIU7491493", "ONEU6507241"], False),
+    (True, ["TIIU7491493", "TIIU7491683"], True),
+])
+def test_31953_requires_verified_return_for_exact_container_population(verified, population, closes):
+    shipment, status = evidence()
+    shipment.container_no = "TIIU7491493, TIIU7491683"
+    shipment.expected_container_count = 2
+    shipment.current_task_status = "en almacén"
+    shipment.current_field_values["gtin-empty-field"] = datetime.now(timezone.utc)-timedelta(days=4)
+    status.discovered_containers = population
+    status.all_containers_empty_returned = verified
+    result = plan(shipment, status)
+    assert result.task_status_update == ("Vacío devuelto" if closes else None)
+    assert any(w.field_id == "gtin-empty-field" for w in result.custom_field_updates) == closes
+
 
 def test_destination_discharge_and_return_without_gate_out():
     shipment, status = evidence()

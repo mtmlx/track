@@ -146,7 +146,8 @@ class OneDcsaClient:
                 events, requested = self.events(scoped, require_booking_identity=True)
             else:
                 events, requested = (discovery, [reference]) if discovery is not None and len(references) == 1 else self.events(scoped)
-            statuses.append(self._map_status(scoped, events, requested))
+            statuses.append(self._map_status(
+                scoped, events, requested, require_return_identity=len(references) > 1))
         status = statuses[0] if len(statuses) == 1 else _aggregate_statuses(shipment, references, statuses)
         status.container_discovery_authoritative = bool(shipment.container_no)
         if allocation:
@@ -215,7 +216,7 @@ class OneDcsaClient:
             destination_port=shipment.destination_port, require_destination_evidence=True,
             movement_details='Booking lifecycle only; containers are not yet assigned. No physical milestone inferred.')
 
-    def _map_status(self, shipment, events, requested):
+    def _map_status(self, shipment, events, requested, *, require_return_identity=False):
         if not events:
             raise ValueError('ONE DCSA returned no events; preserve existing shipment fields')
         discovered = _discovered_containers(events)
@@ -252,6 +253,8 @@ class OneDcsaClient:
             name = to_dcsa_movement_name(event=e)
             source_name = None
             if event_code == 'GTIN' and e.get('emptyIndicatorCode') == 'EMPTY':
+                if require_return_identity and _discovered_containers([e]) != [shipment.container_no]:
+                    continue
                 source_name = 'Empty Container Returned from Customer'
             moves.append(MovementEvent(name=name, location=location, event_time=dt,
                 event_time_local_text=raw_time, event_state='actual' if classifier == 'ACT' else 'estimated',
@@ -444,6 +447,13 @@ def _aggregate_statuses(shipment, references, statuses):
         moves.append(replace(last, vessel_voyage=last.vessel_voyage if len(vessels) == 1 else None))
     moves.sort(key=lambda move: move.event_time, reverse=True)
     actual = [move for move in moves if move.event_state == 'actual']
+    all_empty_returned = any(
+        move.source_event_name == 'Empty Container Returned from Customer'
+        and move.equipment_load_state == 'EMPTY'
+        and same_port(shipment.destination_port, move.location_code)
+        and move.event_time <= datetime.now(timezone.utc)
+        for move in actual
+    )
     latest = actual[0] if actual else None
     eta_status = max(statuses, key=lambda status: status.eta_time) if all(status.eta_time for status in statuses) else None
     vessels = {status.final_vessel_voyage for status in statuses}
@@ -464,4 +474,5 @@ def _aggregate_statuses(shipment, references, statuses):
         final_vessel_voyage=final_vessel, destination_port=shipment.destination_port,
         origin_departure=origin_departure,
         require_destination_evidence=True,
+        all_containers_empty_returned=all_empty_returned,
         movement_details=f'Shipment milestones require matching evidence across all {len(references)} containers.')

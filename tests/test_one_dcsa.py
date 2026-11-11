@@ -686,6 +686,16 @@ def test_multi_empty_return_requires_every_container_after_discharge(monkeypatch
     status=c.fetch_status(returned)
     plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(returned,status)
     assert plan.task_status_update=='Vacío devuelto'
+    assert status.all_containers_empty_returned is True
+    empty_write = next(w for w in plan.custom_field_updates if w.field_id == 'gtin-empty-field')
+    assert empty_write.value.date() == datetime.fromisoformat(second[-1]['eventDateTime']).date()
+
+    del second[-1]['equipmentReference']
+    status=c.fetch_status(returned)
+    assert status.all_containers_empty_returned is False
+    plan=ClickUpClient(_settings(clickup_use_task_status=True)).plan_shipment_update(returned,status)
+    assert plan.task_status_update!='Vacío devuelto'
+    assert not any(w.field_id == 'gtin-empty-field' for w in plan.custom_field_updates)
 
 
 @pytest.mark.parametrize('code,port,empty,field', [
