@@ -45,6 +45,7 @@ class S3:
 def fixture():
     binding = {'tenant': 'synthetic-tenant', 'workspace_id': '1', 'customer_crm_task_id': 'customer',
                'task_id': 'shipment', 'list_id': 'list', 'carrier': 'ONE',
+               'booking_reference': 'BOOK1',
                'container_bookings': {'ABCD1234567': 'BOOK1'},
                'destination_port_codes': ['GTPRQ'], 'terminal_facility_codes': ['TERM']}
     catalog = {'schema_version': 1, 'reader_id': 'tracktrace-s3-v1', 'reader_release_sha256': 'a' * 64,

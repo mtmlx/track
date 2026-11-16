@@ -119,6 +119,7 @@ class MovementArchivePublisher:
                 or str(binding.get('list_id')) != str(shipment.list_id)
                 or any(binding.get(k) != v for k, v in catalog['binding'].items())
                 or carrier(binding.get('carrier')) != carrier(shipment.shipping_line)
+                or binding.get('booking_reference') != shipment.booking_no
                 or entry.get('destination_port_label') != shipment.destination_port):
             raise ValueError('Current shipment catalog binding mismatch')
         mapping = binding.get('container_bookings')
