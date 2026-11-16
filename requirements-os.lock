@@ -1,3 +1,9 @@
+# Glibc / rust-coreutils security pins refreshed for CVE-2026-84243 / CVE-2026-35368 / CVE-2026-35341 on 2026-11-16.
+# SHA256 values from the official Ubuntu resolute-security amd64 Packages index:
+# libc-bin_2.43-2ubuntu2.7_amd64.deb sha256=c0393ea4fa3c45cefe0351db369d3a4a459edc8045856f2e3612ca17e77b2797
+# libc-gconv-modules-extra_2.43-2ubuntu2.7_amd64.deb sha256=408ba056d39651c2489b59522a614276d7a96020c6a401e73cd0da7d771764b0
+# libc6_2.43-2ubuntu2.7_amd64.deb sha256=be83aefc14597fba683031a520f303950a7338b95d74decbe625faa51c49933e
+# rust-coreutils_0.10.0-1ubuntu2~26.04.1_amd64.deb sha256=963dbc5efa92141e7056a9e9f3431ec7f352f2a7c762f2b3242443df39be9115
 # APT and PCRE2 security pins refreshed for USN-8996-1 / USN-8974-1 on 2026-11-05.
 # Superseded GStreamer base, libheif and Perl pins refreshed from resolute-security.
 # Superseded base-files pin refreshed from Ubuntu resolute-updates on 2026-11-05.
@@ -41,9 +47,9 @@ libaudit1=1:4.1.2-1ubuntu0.1
 libblkid1=2.41.3-3ubuntu2.2
 libbrotli1=1.2.0-3ubuntu0.1
 libbz2-1.0=1.0.8-6ubuntu0.1
-libc-bin=2.43-2ubuntu2.4
-libc-gconv-modules-extra=2.43-2ubuntu2.4
-libc6=2.43-2ubuntu2.4
+libc-bin=2.43-2ubuntu2.7
+libc-gconv-modules-extra=2.43-2ubuntu2.7
+libc6=2.43-2ubuntu2.7
 libcurl3t64-gnutls=8.18.0-1ubuntu2.8
 libcurl4t64=8.18.0-1ubuntu2.8
 libegl-mesa0=26.0.8-1ubuntu0.3
@@ -108,6 +114,7 @@ perl-base=5.40.1-7ubuntu0.4
 perl-modules-5.40=5.40.1-7ubuntu0.4
 python3.14=3.14.4-1ubuntu0.2
 python3.14-minimal=3.14.4-1ubuntu0.2
+rust-coreutils=0.10.0-1ubuntu2~26.04.1
 systemd=259.5-0ubuntu3.4
 systemd-sysv=259.5-0ubuntu3.4
 tar=1.35+dfsg-4ubuntu0.4
