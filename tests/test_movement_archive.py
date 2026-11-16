@@ -236,3 +236,34 @@ def test_existing_query_hold_prevents_fetch_archive_and_source_write(monkeypatch
     monkeypatch.setattr(sync, '_fetch_carrier_status', lambda *args: pytest.fail('Held task must not fetch'))
     shipment = ShipmentRef('synthetic-held-task', 'Synthetic', 'one', 'BOOK', 'ABCD1234567', 'list-1')
     sync._run_sync(ClickUpClient(_settings()), [shipment])
+
+
+def test_first_publication_without_bucket_listing_uses_conditional_create(fixture, monkeypatch):
+    publisher, store, shipment, status, _ = fixture
+    original_get = store.get_object
+    def restricted_get(**kw):
+        if kw['Key'] not in store.objects:
+            store.calls.append(('GET', kw))
+            raise S3Error('AccessDenied')
+        return original_get(**kw)
+    monkeypatch.setattr(store, 'get_object', restricted_get)
+    assert publisher.publish(shipment, status)['state'] == 'ARCHIVED'
+    assert store.calls[-1][1]['IfNoneMatch'] == '*'
+
+
+def test_denied_existing_pointer_read_never_overwrites_latest(fixture, monkeypatch):
+    publisher, store, shipment, status, _ = fixture
+    publisher.publish(shipment, status)
+    prior = store.objects['feed/shipment/latest.json']
+    original_get = store.get_object
+    def restricted_get(**kw):
+        if kw['Key'] == 'feed/shipment/latest.json':
+            raise S3Error('AccessDenied')
+        return original_get(**kw)
+    monkeypatch.setattr(store, 'get_object', restricted_get)
+    status.movement_evidence[0]['observed_at'] = '2026-11-16T19:00:00Z'
+    with pytest.raises(S3Error) as failure:
+        publisher.publish(shipment, status)
+    assert failure.value.response['Error']['Code'] == 'PreconditionFailed'
+    assert store.objects['feed/shipment/latest.json'] == prior
+    assert store.calls[-1][1]['IfNoneMatch'] == '*'

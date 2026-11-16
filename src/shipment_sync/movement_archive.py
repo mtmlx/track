@@ -195,7 +195,11 @@ class MovementArchivePublisher:
         try:
             current, current_meta = self._get(latest_key)
         except Exception as error:
-            if _error_code(error) != 'NoSuchKey':
+            # Without ListBucket, S3 returns AccessDenied for a missing key.
+            # A failed read permits only the same conditional first-create;
+            # IfNoneMatch still refuses an existing pointer, so a denied read
+            # cannot authorize overwriting or bypass the source-time guard.
+            if _error_code(error) not in {'NoSuchKey', 'AccessDenied'}:
                 raise
         if current:
             prior = instant(current['observed_at'])
