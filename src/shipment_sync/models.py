@@ -51,6 +51,7 @@ class ShipmentStatus:
     validated_ocean_port: str | None = None
     all_containers_empty_returned: bool | None = None
     msc_booking_anchored_fallback: bool = False
+    container_movements: list["ContainerMovementRecord"] = field(default_factory=list)
 
 
 @dataclass
@@ -66,6 +67,16 @@ class MovementEvent:
     equipment_load_state: str | None = None
     transport_mode: str | None = None
     event_occurrence_time: datetime | None = None
+    source_event_id: str | None = None
+    container_reference: str | None = None
+
+
+@dataclass
+class ContainerMovementRecord:
+    container: str
+    booking: str | None
+    source_url: str | None
+    movements: list[MovementEvent] = field(default_factory=list)
 
 
 @dataclass

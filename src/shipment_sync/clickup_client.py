@@ -18,6 +18,7 @@ from .carriers.common import extract_container_numbers
 from .config import Settings
 from .destination import same_delivery_place, same_port
 from .date_utils import format_display_date, format_port_local_time
+from .container_progress import container_progress, progress_comment
 from .models import (
     MovementEvent,
     ShipmentFieldWrite,
@@ -956,6 +957,10 @@ class ClickUpClient:
             comment_text = None
 
         fallback_note = _msc_booking_fallback_note(shipment, status)
+        progress = container_progress(shipment, status, now=now_utc)
+        if progress is not None and previous_snapshot_hash != snapshot_hash:
+            comment_text = (comment_text + '\n\n' if comment_text else '') + progress_comment(progress)
+            plan_changed = True
         if fallback_note:
             comment_text = (comment_text + '\n\n' if comment_text else '') + fallback_note
 
@@ -984,6 +989,17 @@ class ClickUpClient:
                 if len(current) != 1 or identity(current[0]) != identity(shipment):
                     raise ValueError('MSC journey mismatch: shipment identity or workflow changed after capture review; obtain a fresh preview')
             plan = self.plan_shipment_update(shipment, status)
+            # Some production lists have no snapshot custom field. The saved
+            # register fingerprint still prevents identical comments on reruns.
+            register = progress_comment(container_progress(shipment, status))
+            if register and plan.comment_text and register in plan.comment_text:
+                marker = register.splitlines()[-1]
+                latest_register = next((text for text in self._fetch_recent_task_comment_texts(shipment.task_id, limit=25)
+                                        if 'Container register fingerprint: ' in text), '')
+                if marker in latest_register:
+                    plan.comment_text = plan.comment_text.replace(register, '').strip() or None
+                    plan.changed = bool(plan.task_status_update or any(
+                        w.field_id != self.settings.cf_status_last_checked for w in plan.custom_field_updates))
         except Exception as exc:
             # Preserve the original exception contract while identifying a read-only failure.
             exc.shipment_sync_phase = 'projection'
@@ -3017,6 +3033,9 @@ def _compute_snapshot_hash(
         ),
     }
     if status.raw_source == 'https://apix.one-line.com/v2/events':
+        progress = container_progress(shipment, status)
+        if progress is not None:
+            snapshot['container_progress'] = progress
         snapshot['origin_departure'] = (status.origin_departure.event_time_local_text
                                         if status.origin_departure else None)
         snapshot['origin_departure_state'] = (status.origin_departure.event_state

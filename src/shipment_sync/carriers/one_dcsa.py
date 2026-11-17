@@ -9,7 +9,7 @@ import requests
 
 from shipment_sync.carriers.common import bounded_response_json, reject_response_redirect, parse_event_time, to_dcsa_movement_name
 from shipment_sync.destination import same_port
-from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
+from shipment_sync.models import ContainerMovementRecord, MovementEvent, ShipmentRef, ShipmentStatus
 from shipment_sync.one_split_bookings import container_bookings
 
 
@@ -149,6 +149,11 @@ class OneDcsaClient:
             statuses.append(self._map_status(
                 scoped, events, requested, require_return_identity=len(references) > 1))
         status = statuses[0] if len(statuses) == 1 else _aggregate_statuses(shipment, references, statuses)
+        status.container_movements = [ContainerMovementRecord(
+            container=reference,
+            booking=allocation[reference] if allocation else shipment.booking_no,
+            source_url=item.source_url, movements=list(item.recent_moves))
+            for reference, item in zip(references, statuses)]
         status.container_discovery_authoritative = bool(shipment.container_no)
         if allocation:
             status.container_booking_map = allocation
@@ -260,6 +265,7 @@ class OneDcsaClient:
                 event_time_local_text=raw_time, event_state='actual' if classifier == 'ACT' else 'estimated',
                 vessel_voyage=vv, source_event_name=source_name, location_code=code,
                 transport_mode=tc.get('modeOfTransport'),
+                source_event_id=e.get('eventID'), container_reference=e.get('equipmentReference'),
                 equipment_load_state=e.get('emptyIndicatorCode') if e.get('eventType') == 'EQUIPMENT' else None))
             if event_code == 'ARRI' and same_port(shipment.destination_port, code or location):
                 arrivals.append((classifier == 'ACT', dt, raw_time, e))
