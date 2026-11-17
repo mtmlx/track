@@ -138,3 +138,19 @@ def test_dcsa_fetch_retains_per_container_identity_and_event_id(monkeypatch):
         assert record.booking == 'BOOK'
         assert all(m.container_reference == record.container for m in record.movements)
         assert all(m.source_event_id for m in record.movements)
+
+
+def test_reinstated_evidence_is_not_suppressed_by_older_matching_register(monkeypatch):
+    sh, status = sample()
+    client = ClickUpClient(_settings(clickup_use_task_status=True, cf_track_trace_snapshot=None))
+    first = client.plan_shipment_update(sh, status)
+    sh.current_field_values.update({w.field_id:w.value for w in first.custom_field_updates})
+    report_a = progress_comment(container_progress(sh, status))
+    newer_b = 'Container movement register\nContainer register fingerprint: different-evidence'
+    monkeypatch.setattr(client, '_fetch_recent_task_comment_texts', lambda *a, **kw: [newer_b,report_a])
+    monkeypatch.setattr(client, '_set_custom_field', lambda *a, **kw: None)
+    monkeypatch.setattr(client, '_set_date_custom_field', lambda *a, **kw: None)
+    posted = []
+    monkeypatch.setattr(client, '_post_comment', lambda task, text: posted.append(text))
+    client.update_shipment_status(sh, status)
+    assert len(posted) == 1 and report_a in posted[0]

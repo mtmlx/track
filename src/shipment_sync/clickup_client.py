@@ -994,7 +994,9 @@ class ClickUpClient:
             register = progress_comment(container_progress(shipment, status))
             if register and plan.comment_text and register in plan.comment_text:
                 marker = register.splitlines()[-1]
-                if any(marker in text for text in self._fetch_recent_task_comment_texts(shipment.task_id, limit=25)):
+                latest_register = next((text for text in self._fetch_recent_task_comment_texts(shipment.task_id, limit=25)
+                                        if 'Container register fingerprint: ' in text), '')
+                if marker in latest_register:
                     plan.comment_text = plan.comment_text.replace(register, '').strip() or None
                     plan.changed = bool(plan.task_status_update or any(
                         w.field_id != self.settings.cf_status_last_checked for w in plan.custom_field_updates))
