@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+import hashlib
 import os
 import re
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -78,8 +79,11 @@ class WanHaiAdapter(CarrierAdapter):
         for reference, cargo_type in attempts:
             for attempt in range(self.max_retries + 1):
                 try:
-                    status = self._playwright_request(reference=reference, cargo_type=cargo_type)
                     structured_booking = _normalize_reference(shipment.booking_no or "").upper()
+                    args = {"reference": reference, "cargo_type": cargo_type}
+                    if shipment.capture_booking_itinerary and cargo_type == "2" and reference.upper() == structured_booking:
+                        args["capture_booking_itinerary"] = True
+                    status = self._playwright_request(**args)
                     if cargo_type == "2" and reference.upper() != structured_booking:
                         expected = set(extract_container_numbers(shipment.container_no or ""))
                         actual = set(extract_container_numbers(status.discovered_containers))
@@ -98,7 +102,7 @@ class WanHaiAdapter(CarrierAdapter):
             raise last_error
         raise ValueError("Wan Hai Playwright request failed without specific error")
 
-    def _playwright_request(self, *, reference: str, cargo_type: str) -> ShipmentStatus:
+    def _playwright_request(self, *, reference: str, cargo_type: str, capture_booking_itinerary: bool = False) -> ShipmentStatus:
         def _run() -> ShipmentStatus:
             try:
                 from playwright.sync_api import sync_playwright
@@ -127,6 +131,13 @@ class WanHaiAdapter(CarrierAdapter):
                     if self.playwright_locale:
                         context_kwargs["locale"] = self.playwright_locale
                     context = browser.new_context(**context_kwargs)
+                    navigation_receipts = {}
+                    if capture_booking_itinerary:
+                        def record_navigation(response):
+                            request = response.request
+                            if request.is_navigation_request() and request.frame == request.frame.page.main_frame:
+                                navigation_receipts[response.url] = response.status
+                        context.on("response", record_navigation)
                     page = context.new_page()
                     response = page.goto(self.tracking_page_url, wait_until="domcontentloaded", timeout=timeout_ms)
                     html = page.content()
@@ -162,6 +173,7 @@ class WanHaiAdapter(CarrierAdapter):
 
                     detail = None
                     detail_html = ""
+                    detail_page = None
                     booking_reference = result_data.get("booking_reference")
                     if booking_reference:
                         try:
@@ -181,17 +193,49 @@ class WanHaiAdapter(CarrierAdapter):
                         except Exception:
                             detail = None
 
-                    return _status_from_parsed(
+                    status = _status_from_parsed(
                         cargo_type=cargo_type,
                         result=result_data,
                         detail=detail,
                         discovered_containers=discovered_containers,
                         source_url=results_page.url,
                     )
+                    if capture_booking_itinerary and cargo_type == "2" and detail_page is not None:
+                        # Failure to prove the native page is an evidence gap;
+                        # it cannot change the existing carrier status result.
+                        try:
+                            status.booking_itinerary_evidence = [_booking_html_capture(
+                                reference, result_html, results_page.url, detail_html, detail_page.url,
+                                navigation_receipts)]
+                        except ValueError:
+                            pass
+                    return status
                 finally:
                     browser.close()
 
         return run_sync_playwright(_run)
+
+
+def _booking_html_capture(reference, result_html, result_url, detail_html, detail_url, receipts):
+    """Retain exact successful native DOMs; this never constructs DCSA events."""
+    result = _parse_result_page(result_html, cargo_type="2") or {}
+    detail = _parse_booking_detail_page(detail_html)
+    if result.get("booking_reference") != reference or detail.get("booking_reference") != reference:
+        raise ValueError("Both native pages must identify the requested booking")
+    documents = []
+    for kind, html, url in (("BOOKING_RESULT", result_html, result_url), ("BOOKING_DETAIL", detail_html, detail_url)):
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or parsed.hostname not in {"www.wanhai.com", "vip.wanhai.com"}
+                or parsed.port not in (None, 443) or parsed.username or parsed.password
+                or receipts.get(url) != 200 or not 0 < len(html.encode()) <= 2_000_000
+                or _looks_like_anti_bot_page(html)):
+            raise ValueError("Verified native booking page unavailable")
+        documents.append({"kind": kind, "capture_kind": "BROWSER_DOM", "url": url, "final_url": url,
+                          "navigation_status": 200, "complete": True, "html": html,
+                          "sha256": hashlib.sha256(html.encode()).hexdigest()})
+    return {"native_format": "WANHAI_BOOKING_HTML", "request_booking": reference, "request_container": None,
+            "provider_native": True, "complete": True, "observed_at": datetime.now(timezone.utc).isoformat(),
+            "native_documents": documents}
 
 
 def _build_reference_attempts(shipment: ShipmentRef) -> list[tuple[str, str]]:

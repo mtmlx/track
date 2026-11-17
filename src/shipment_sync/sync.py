@@ -2,7 +2,7 @@ from .terminal import terminal_safe_text
 import sys
 import json
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import multiprocessing as mp
 import os
@@ -22,6 +22,8 @@ from shipment_sync.clickup_client import ClickUpClient
 from shipment_sync.config import Settings
 from shipment_sync.models import ShipmentRef, ShipmentStatus
 from shipment_sync.one_write_holds import write_hold_reason
+from shipment_sync.movement_archive import MovementArchivePublisher
+from shipment_sync.booking_itinerary_archive import BookingItineraryArchivePublisher
 
 
 @dataclass
@@ -75,6 +77,16 @@ def _run_sync(
     audit: SafeSyncAuditLogger | None = None,
 ) -> SyncStats:
     adapters = build_carrier_registry()
+    try:
+        movement_archive = MovementArchivePublisher.from_env()
+    except Exception:
+        movement_archive = None
+        print('Movement archive configuration unavailable; existing tracking continues.', file=sys.stderr)
+    try:
+        booking_archive = BookingItineraryArchivePublisher.from_env()
+    except Exception:
+        booking_archive = None
+        print('Booking itinerary archive configuration unavailable; existing tracking continues.', file=sys.stderr)
     all_shipments = shipments if shipments is not None else client.list_shipments()
     if audit is not None:
         audit.log_event(
@@ -263,7 +275,37 @@ def _run_sync(
 
         failure_phase = 'lookup'
         try:
-            status = _fetch_carrier_status(adapter, shipment)
+            fetch_shipment = shipment
+            if booking_archive is not None:
+                try:
+                    if booking_archive.registered(shipment):
+                        fetch_shipment = replace(shipment, capture_booking_itinerary=True)
+                except Exception:
+                    print(terminal_safe_text(json.dumps({'event':'booking_itinerary_archive','task_id':shipment.task_id,
+                                                        'state':'REGISTRATION_READ_GAP'})),file=sys.stderr)
+            status = _fetch_carrier_status(adapter, fetch_shipment)
+            if booking_archive is not None and fetch_shipment.capture_booking_itinerary:
+                try:
+                    archive_result = booking_archive.publish(shipment,status)
+                    print(terminal_safe_text(json.dumps({'event':'booking_itinerary_archive',**archive_result})),file=sys.stderr)
+                except Exception:
+                    print(terminal_safe_text(json.dumps({'event':'booking_itinerary_archive','task_id':shipment.task_id,
+                                                        'state':'ARCHIVE_READ_GAP'})),file=sys.stderr)
+            if movement_archive is not None:
+                try:
+                    if movement_archive.wants_complete_maersk(shipment, status):
+                        try:
+                            adapter.capture_booking_movement_evidence(shipment, status)
+                        except Exception:
+                            print(terminal_safe_text(json.dumps({'event': 'movement_archive', 'task_id': shipment.task_id,
+                                                                'state': 'PARTIAL_MAERSK_SCOPE_PRESERVED'})), file=sys.stderr)
+                    archive_result = movement_archive.publish(shipment, status)
+                    print(terminal_safe_text(json.dumps({'event': 'movement_archive', **archive_result})), file=sys.stderr)
+                except Exception:
+                    # Archive failure is a visible monitoring gap, not a change
+                    # to pre-existing carrier queries or source write behavior.
+                    print(terminal_safe_text(json.dumps({'event': 'movement_archive', 'task_id': shipment.task_id,
+                                                        'state': 'ARCHIVE_READ_GAP'})), file=sys.stderr)
             if shipment.shipping_line == 'one':
                 # CloudWatch retains successful evidence even when no field changes.
                 evidence = {'event': 'one_tracking_validated', 'task_id': shipment.task_id,

@@ -26,6 +26,7 @@ from shipment_sync.carriers.common import (
 )
 from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
 from shipment_sync.destination import same_port
+from shipment_sync.movement_archive import native_batch
 from shipment_sync.playwright_runner import configured_browser_channel, run_sync_playwright
 
 
@@ -128,6 +129,20 @@ class CmaCgmAdapter(CarrierAdapter):
     def fetch_status(self, shipment: ShipmentRef) -> ShipmentStatus:
         if self._api_mode_requested() and shipment.container_no:
             return self._fetch_container_statuses(shipment)
+        if shipment.capture_booking_itinerary and self._api_mode_requested():
+            if not shipment.booking_no or shipment.container_no:
+                raise ValueError('Booking itinerary requires the exact booking without assigned containers')
+            fetched = self._fetch_dcsa_event_pages(shipment)
+            # Preserve legacy status/field planning from the same first response;
+            # remaining native pages are private itinerary evidence only.
+            for native in fetched.events:
+                if native.get('eventType') == 'TRANSPORT' and _booking_document_ids(native) != {shipment.booking_no}:
+                    raise ValueError('CMA booking itinerary contains unbound transport events')
+            status = self._status_from_payload(payload=fetched.first_page_payload,
+                source=f'cma-api:{fetched.source_url}',
+                source_url=_build_source_url(self.url_template,shipment.booking_no,self.booking_type_code))
+            status.movement_evidence = [native_batch(list(fetched.events),fetched.source_url,request_booking=shipment.booking_no)]
+            return status
         reference, ref_type = _pick_reference(
             shipment=shipment,
             booking_code=self.booking_type_code,
@@ -177,6 +192,8 @@ class CmaCgmAdapter(CarrierAdapter):
             )
             if set(status.discovered_containers) != {reference} or not status.recent_moves:
                 raise ValueError(f"CMA returned missing or conflicting container evidence for {reference}")
+            status.movement_evidence = [native_batch(list(fetched.events), fetched.source_url,
+                request_container=reference)]
             statuses.append(_bind_destination(status, shipment.destination_port))
         return _consolidate_containers(shipment, references, statuses)
 
@@ -203,6 +220,8 @@ class CmaCgmAdapter(CarrierAdapter):
             if scoped_units != {reference} or not status.recent_moves:
                 raise ValueError(f'CMA booking evidence incomplete for container {reference}')
             status.discovered_containers = [reference]
+            status.movement_evidence = [native_batch(scoped, fetched.source_url,
+                request_booking=shipment.booking_no, request_container=reference)]
             statuses.append(_bind_destination(status, shipment.destination_port))
         return _consolidate_containers(shipment, references, statuses)
 
@@ -845,6 +864,7 @@ def _consolidate_containers(shipment: ShipmentRef, references: list[str], status
                    discovered_containers=references, container_discovery_authoritative=False,
                    eta_time=eta.eta_time if eta else None, eta_local_text=eta.eta_local_text if eta else None,
                    vessel_voyage=vessel, final_vessel_voyage=vessel,
+                   movement_evidence=[batch for item in statuses for batch in item.movement_evidence],
                    movement_details=f"Validated CMA evidence for all {len(references)} shipment containers")
 
 
