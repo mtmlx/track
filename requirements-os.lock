@@ -108,6 +108,7 @@ perl-base=5.40.1-7ubuntu0.4
 perl-modules-5.40=5.40.1-7ubuntu0.4
 python3.14=3.14.4-1ubuntu0.2
 python3.14-minimal=3.14.4-1ubuntu0.2
+rust-coreutils=0.10.0-1ubuntu2~26.04.1
 systemd=259.5-0ubuntu3.4
 systemd-sysv=259.5-0ubuntu3.4
 tar=1.35+dfsg-4ubuntu0.4
