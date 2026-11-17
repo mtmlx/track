@@ -15,6 +15,8 @@ def container_progress(shipment, status, *, now=None):
     records = sorted(status.container_movements, key=lambda r: r.container)
     population = {r.container for r in records}
     expected = shipment.expected_container_count or len(recorded | population)
+    if max(expected, len(recorded), len(population)) <= 1:
+        return None
     population_verified = (len(records) == len(population) == expected
                            and recorded.issubset(population))
     rows = []

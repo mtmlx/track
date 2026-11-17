@@ -103,6 +103,14 @@ def test_other_carriers_unchanged():
     assert container_progress(sh, status) is None
 
 
+def test_single_container_workflow_is_unchanged():
+    sh, status = sample()
+    sh.expected_container_count = 1
+    sh.container_no = 'DRYU9944977'
+    status.container_movements = status.container_movements[:1]
+    assert container_progress(sh, status) is None
+
+
 def test_comment_fingerprint_deduplicates_without_snapshot_field(monkeypatch):
     sh, status = sample()
     client = ClickUpClient(_settings(clickup_use_task_status=True, cf_track_trace_snapshot=None))
