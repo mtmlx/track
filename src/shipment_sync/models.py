@@ -23,6 +23,8 @@ class ShipmentRef:
     workflow_status_names: tuple[str, ...] | None = None
     master_bl_no: str | None = None
     tags: tuple[str, ...] = ()
+    # Internal read scope only, set after the booking archive catalog is verified.
+    capture_booking_itinerary: bool = False
 
 
 @dataclass
@@ -53,6 +55,8 @@ class ShipmentStatus:
     msc_booking_anchored_fallback: bool = False
     # Existing provider responses only; excluded from operational field plans.
     movement_evidence: list[dict[str, Any]] = field(default_factory=list)
+    # Native booking HTML is kept separate from transport/equipment events.
+    booking_itinerary_evidence: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

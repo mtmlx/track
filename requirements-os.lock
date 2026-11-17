@@ -1,3 +1,8 @@
+# GStreamer base security pins refreshed for USN-9094-1 on 2026-11-17.
+# CVE-2026-85150 / CVE-2026-86476; official resolute-security amd64 Packages.
+# gstreamer1.0-plugins-base_1.28.2-1ubuntu0.3_amd64.deb sha256=fca3bd01ab67475dc6b763787175d156b69c807701f8f84b867b58dd46615380
+# libgstreamer-gl1.0-0_1.28.2-1ubuntu0.3_amd64.deb sha256=c937a6e6cf1b1435a929fe7d436aa281b976cf7033bec15582c30d0d7094eaea
+# libgstreamer-plugins-base1.0-0_1.28.2-1ubuntu0.3_amd64.deb sha256=2048dad3bc852f82d00353d60cd5be0d013172179955263588c2ea191e81870d
 # Glibc / rust-coreutils security pins refreshed for CVE-2026-84243 / CVE-2026-35368 / CVE-2026-35341 on 2026-11-16.
 # SHA256 values from the official Ubuntu resolute-security amd64 Packages index:
 # libc-bin_2.43-2ubuntu2.7_amd64.deb sha256=c0393ea4fa3c45cefe0351db369d3a4a459edc8045856f2e3612ca17e77b2797
@@ -31,7 +36,7 @@ gpgconf=2.4.8-4ubuntu3.1
 gpgv=2.4.8-4ubuntu3.1
 gstreamer1.0-plugins-good=1.28.2-2ubuntu0.4
 gstreamer1.0-plugins-bad=1.28.2-1ubuntu1.2
-gstreamer1.0-plugins-base=1.28.2-1ubuntu0.2
+gstreamer1.0-plugins-base=1.28.2-1ubuntu0.3
 gzip=1.14-1~exp2ubuntu1.1
 krb5-locales=1.22.1-2ubuntu4.1
 libapparmor1=5.0.2-0ubuntu1~26.04.1
@@ -61,8 +66,8 @@ libgcrypt20=1.12.0-2ubuntu1.1
 libgl1-mesa-dri=26.0.8-1ubuntu0.3
 libglx-mesa0=26.0.8-1ubuntu0.3
 libglib2.0-0t64=2.88.0-1ubuntu0.1
-libgstreamer-gl1.0-0=1.28.2-1ubuntu0.2
-libgstreamer-plugins-base1.0-0=1.28.2-1ubuntu0.2
+libgstreamer-gl1.0-0=1.28.2-1ubuntu0.3
+libgstreamer-plugins-base1.0-0=1.28.2-1ubuntu0.3
 libgstreamer-plugins-bad1.0-0=1.28.2-1ubuntu1.2
 libgstreamer-plugins-extra1.0-0=1.28.2-1ubuntu1.2
 libgssapi-krb5-2=1.22.1-2ubuntu4.1

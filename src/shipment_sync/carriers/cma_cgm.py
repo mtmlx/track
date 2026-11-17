@@ -129,6 +129,20 @@ class CmaCgmAdapter(CarrierAdapter):
     def fetch_status(self, shipment: ShipmentRef) -> ShipmentStatus:
         if self._api_mode_requested() and shipment.container_no:
             return self._fetch_container_statuses(shipment)
+        if shipment.capture_booking_itinerary and self._api_mode_requested():
+            if not shipment.booking_no or shipment.container_no:
+                raise ValueError('Booking itinerary requires the exact booking without assigned containers')
+            fetched = self._fetch_dcsa_event_pages(shipment)
+            # Preserve legacy status/field planning from the same first response;
+            # remaining native pages are private itinerary evidence only.
+            for native in fetched.events:
+                if native.get('eventType') == 'TRANSPORT' and _booking_document_ids(native) != {shipment.booking_no}:
+                    raise ValueError('CMA booking itinerary contains unbound transport events')
+            status = self._status_from_payload(payload=fetched.first_page_payload,
+                source=f'cma-api:{fetched.source_url}',
+                source_url=_build_source_url(self.url_template,shipment.booking_no,self.booking_type_code))
+            status.movement_evidence = [native_batch(list(fetched.events),fetched.source_url,request_booking=shipment.booking_no)]
+            return status
         reference, ref_type = _pick_reference(
             shipment=shipment,
             booking_code=self.booking_type_code,
