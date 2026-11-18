@@ -147,6 +147,8 @@ def test_missing_reference_notice_precedes_recent_skip_and_preflight(monkeypatch
 def test_terminal_and_held_missing_tasks_are_never_notified(monkeypatch,status,task_id):
     c = ClickUpClient(_settings())
     s = shipment(current_task_status=status); s.task_id=task_id; s.booking_no=None; s.container_no=None
+    if task_id == '86e3etkkm':
+        monkeypatch.setattr('shipment_sync.sync.write_hold_reason', lambda _: 'test hold')
     monkeypatch.setattr('shipment_sync.sync.build_carrier_registry',lambda:{})
     monkeypatch.setattr(c,'report_tracking_failure',lambda *a,**k:pytest.fail('excluded task must not be touched'))
     _run_sync(c,[s])
