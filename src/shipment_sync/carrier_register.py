@@ -1,12 +1,13 @@
-"""Publish Maersk container evidence without changing shipment fields or status."""
+"""Publish carrier container evidence without changing shipment fields or status."""
 
 from .container_progress import container_progress, progress_comment
 from .one_write_holds import write_hold_reason
 from .tracking_failures import carrier_name
 
 
-def publish_maersk_register(client, shipment, adapter):
-    if (carrier_name(shipment.shipping_line) != "Maersk" or write_hold_reason(shipment)
+def publish_carrier_register(client, shipment, adapter):
+    carrier = carrier_name(shipment.shipping_line)
+    if (carrier not in {"Maersk", "CMA CGM"} or write_hold_reason(shipment)
             or not shipment.booking_no or not shipment.destination_port
             or (shipment.expected_container_count or 0) < 2):
         return "ineligible"
@@ -27,6 +28,6 @@ def publish_maersk_register(client, shipment, adapter):
     if len(refs) != 1 or identity(refs[0]) != identity(shipment) or write_hold_reason(refs[0]):
         return "identity_changed"
     client._post_comment(shipment.task_id,
-        "Maersk carrier evidence. Unconfirmed means no qualifying actual event was verified; "
+        f"{carrier} carrier evidence. Unconfirmed means no qualifying actual event was verified; "
         "it does not prove the movement did not occur.\n\n" + report)
     return "published"
