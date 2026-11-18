@@ -282,6 +282,16 @@ def _run_sync(
                 print(terminal_safe_text(json.dumps(evidence)), file=sys.stderr)
             failure_phase = 'writeback'
             write_result = client.update_shipment_status(shipment, status)
+            if (shipment.shipping_line in {"maersk", "maersk line", "a.p. moller - maersk"}
+                    and (shipment.expected_container_count or 0) > 1):
+                from .maersk_register import publish_maersk_register
+
+                try:
+                    outcome = publish_maersk_register(client, shipment, adapter)
+                except Exception as exc:
+                    outcome = f"preview_error:{type(exc).__name__}"
+                print(terminal_safe_text(json.dumps({"event": "maersk_container_register",
+                    "task_id": shipment.task_id, "outcome": outcome})), file=sys.stderr)
             if shipment.shipping_line == 'one':
                 print(terminal_safe_text(json.dumps({'event': 'one_tracking_writeback', 'task_id': shipment.task_id,
                                   'outcome': 'updated' if write_result.changed else 'unchanged'})), file=sys.stderr)
