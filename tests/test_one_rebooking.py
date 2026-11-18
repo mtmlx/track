@@ -110,9 +110,10 @@ def test_past_booking_forecast_does_not_prove_transit(booking_source):
     assert not status.recent_moves
 
 
-def test_held_33793_remains_blocked_with_booking_origin_forecast(booking_source):
+def test_held_shipment_remains_blocked_with_booking_origin_forecast(booking_source, monkeypatch):
     adapter,s,row=booking_source
     s.task_id='86e3etkkm'
+    monkeypatch.setattr('shipment_sync.one_write_holds.json.loads', lambda _: {s.task_id: '33793 fixture'})
     assert write_hold_reason(s)
     with pytest.raises(ValueError,match='33793'):
         writer().update_shipment_status(s,adapter._fetch_booking_only_status(s))
@@ -332,12 +333,13 @@ def test_actual_origin_departure_wins_over_revised_forecast(monkeypatch):
     assert status.origin_departure.event_state == 'actual'
 
 
-def test_33793_hold_blocks_all_mutations_but_allows_preview(monkeypatch):
+def test_hold_blocks_all_mutations_but_allows_preview(monkeypatch):
     s = shipment(); s.task_id = '86e3etkkm'
     status = client(monkeypatch, [(forecast_rows(), {})]).fetch_status(s)
     c = writer()
     monkeypatch.setattr(c, '_request', lambda *a, **k: pytest.fail('held task must not be touched'))
     assert c.plan_shipment_update(s, status).changed
+    monkeypatch.setattr('shipment_sync.one_write_holds.json.loads', lambda _: {s.task_id: 'approved repair preview'})
     with pytest.raises(ValueError, match='approved repair preview'):
         c.update_shipment_status(s, status)
     assert write_hold_reason(replace(s, shipping_line='maersk')) is None
@@ -347,6 +349,7 @@ def test_scheduled_hold_precedes_preflight_lookup_and_failure_comments(monkeypat
     from shipment_sync.sync import _run_sync
     s = shipment(); s.task_id = '86e3etkkm'
     c = writer()
+    monkeypatch.setattr('shipment_sync.sync.write_hold_reason', lambda _: 'test hold')
     monkeypatch.setattr('shipment_sync.sync.build_carrier_registry', lambda: {})
     monkeypatch.setattr(c, 'report_tracking_failure', lambda *a, **k: pytest.fail('no comment'))
     stats = _run_sync(c, [s])
