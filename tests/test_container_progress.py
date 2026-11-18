@@ -61,12 +61,13 @@ def test_staggered_gate_out_and_estimated_returns():
     assert '0/2 ACTUAL' in progress_comment(p)
 
 
-def test_maersk_publication_only_posts_once_and_never_updates_fields():
+@pytest.mark.parametrize("carrier", ["maersk", "cma-cgm"])
+def test_carrier_publication_only_posts_once_and_never_updates_fields(carrier):
     from types import SimpleNamespace
-    from shipment_sync.maersk_register import publish_maersk_register
+    from shipment_sync.carrier_register import publish_carrier_register
 
     sh, status = sample()
-    sh.shipping_line = "maersk"
+    sh.shipping_line = carrier
     comments = []
     client = SimpleNamespace(
         get_shipments_by_task_ids=lambda *a, **kw: [sh],
@@ -74,11 +75,11 @@ def test_maersk_publication_only_posts_once_and_never_updates_fields():
         _post_comment=lambda task, text: comments.insert(0, text),
     )
     adapter = SimpleNamespace(fetch_container_progress_status=lambda shipment: status)
-    assert publish_maersk_register(client, sh, adapter) == "published"
-    assert publish_maersk_register(client, sh, adapter) == "unchanged"
+    assert publish_carrier_register(client, sh, adapter) == "published"
+    assert publish_carrier_register(client, sh, adapter) == "unchanged"
     assert len(comments) == 1
     status.container_movements[0].movements[-1].event_state = "actual"
-    assert publish_maersk_register(client, sh, adapter) == "published"
+    assert publish_carrier_register(client, sh, adapter) == "published"
     assert "Empty returned: 1/2 ACTUAL" in comments[0]
 
 

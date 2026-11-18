@@ -24,7 +24,7 @@ from shipment_sync.carriers.common import (
     parse_event_time,
     to_dcsa_movement_name,
 )
-from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
+from shipment_sync.models import ContainerMovementRecord, MovementEvent, ShipmentRef, ShipmentStatus
 from shipment_sync.destination import same_port
 from shipment_sync.playwright_runner import configured_browser_channel, run_sync_playwright
 
@@ -161,6 +161,12 @@ class CmaCgmAdapter(CarrierAdapter):
             source_url=source_url,
             playwright_error=playwright_error,
         )
+
+    def fetch_container_progress_status(self, shipment: ShipmentRef) -> ShipmentStatus:
+        """Register evidence must come from the official booking-scoped API."""
+        if not self._api_mode_requested() or not shipment.booking_no or not shipment.container_no:
+            raise ValueError("CMA register requires an official API booking and container roster")
+        return self._fetch_container_statuses(shipment)
 
     def _fetch_container_statuses(self, shipment: ShipmentRef) -> ShipmentStatus:
         references = _container_references(shipment.container_no)
@@ -843,6 +849,10 @@ def _consolidate_containers(shipment: ShipmentRef, references: list[str], status
                    latest_move=latest, location=latest.location if latest else None,
                    event_time=latest.event_time if latest else None, recent_moves=moves,
                    discovered_containers=references, container_discovery_authoritative=False,
+                   container_movements=[
+                       ContainerMovementRecord(reference, shipment.booking_no, status.source_url, status.recent_moves)
+                       for reference, status in zip(references, statuses, strict=True)
+                   ],
                    eta_time=eta.eta_time if eta else None, eta_local_text=eta.eta_local_text if eta else None,
                    vessel_voyage=vessel, final_vessel_voyage=vessel,
                    movement_details=f"Validated CMA evidence for all {len(references)} shipment containers")
@@ -1125,6 +1135,8 @@ def _extract_moves(payload: dict[str, Any]) -> list[MovementEvent]:
                 equipment_load_state=str(event.get("emptyIndicatorCode") or "").strip().upper() or None,
                 transport_mode=str(call.get("modeOfTransport") or "").strip().upper() or None,
                 event_occurrence_time=parse_event_time(local_time_text),
+                source_event_id=event.get("eventID"),
+                container_reference=event.get("equipmentReference"),
             )
         )
 
