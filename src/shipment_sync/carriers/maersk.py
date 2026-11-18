@@ -24,7 +24,7 @@ from shipment_sync.carriers.common import (
     parse_event_time,
     to_dcsa_movement_name,
 )
-from shipment_sync.models import MovementEvent, ShipmentRef, ShipmentStatus
+from shipment_sync.models import ContainerMovementRecord, MovementEvent, ShipmentRef, ShipmentStatus
 from shipment_sync.destination import same_port
 from shipment_sync.playwright_runner import run_sync_playwright
 
@@ -122,6 +122,18 @@ class MaerskAdapter(CarrierAdapter):
         if fallback_status is not None:
             return fallback_status
         raise ValueError("Missing booking/container number")
+
+    def fetch_container_progress_status(self, shipment: ShipmentRef) -> ShipmentStatus:
+        """Preview the booking-wide equipment history without changing normal lookup order."""
+        if not shipment.booking_no:
+            raise ValueError("Maersk register preview requires a booking reference")
+        events, url = self.fetch_dcsa_events(replace(shipment, container_no=None))
+        return ShipmentStatus(
+            status_text="Maersk container register preview",
+            container_movements=_equipment_movement_records(
+                events, shipment.booking_no, _build_maersk_tracking_url(shipment.booking_no)),
+            raw_source=url,
+        )
 
     def fetch_dcsa_events(self, shipment: ShipmentRef) -> tuple[list[dict[str, Any]], str]:
         """Fetch official Maersk Events API payloads without any web fallback.
@@ -856,6 +868,36 @@ def _status_from_events(events: list[dict], source: str, *, source_url: str | No
         movement_details=movement_details,
         vessel_voyage=vessel_voyage,
     ), destination_port)
+
+
+def _equipment_movement_records(events, reference, source_url):
+    grouped = {}
+    for event in events:
+        container = event.get("equipmentReference")
+        classifier = event.get("eventClassifierCode")
+        if (event.get("eventType") != "EQUIPMENT" or not isinstance(container, str)
+                or not re.fullmatch(r"[A-Z]{4}\d{7}", container)
+                or classifier not in {"ACT", "EST", "PLN"}):
+            continue
+        grouped.setdefault(container, [])
+        if (event.get("equipmentEventTypeCode") not in {"DISC", "GTOT", "GTIN"}
+                or not event.get("eventID")):
+            continue
+        try:
+            timestamp = datetime.fromisoformat(event.get("eventDateTime") or "")
+        except (ValueError, TypeError):
+            continue
+        if timestamp.tzinfo is None:
+            continue
+        move = _event_to_movement(event)
+        move.container_reference = container
+        move.source_event_id = event["eventID"]
+        move.equipment_load_state = event.get("emptyIndicatorCode")
+        move.event_time = timestamp
+        move.event_time_local_text = event["eventDateTime"]
+        grouped[container].append(move)
+    return [ContainerMovementRecord(container, reference, source_url, moves)
+            for container, moves in sorted(grouped.items())]
 
 
 def _event_sort_key(event: dict) -> tuple[int, str]:

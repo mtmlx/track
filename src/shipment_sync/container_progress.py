@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from .destination import same_port
 
 
-def container_progress(shipment, status, *, now=None):
-    if shipment.shipping_line.strip().lower() != 'one' or not status.container_movements:
+def container_progress(shipment, status, *, now=None, preview=False):
+    if (not preview and shipment.shipping_line.strip().lower() != 'one') or not status.container_movements:
         return None
     now = now or datetime.now(timezone.utc)
     recorded = set(re.findall(r'\b[A-Z]{4}\d{7}\b', (shipment.container_no or '').upper()))
@@ -19,9 +19,18 @@ def container_progress(shipment, status, *, now=None):
         return None
     population_verified = (len(records) == len(population) == expected
                            and recorded.issubset(population))
+    if preview and shipment.shipping_line.strip().lower() != 'one':
+        population_verified = population_verified and bool(recorded) and recorded == population
     rows = []
     for record in records:
         def valid(move):
+            if shipment.shipping_line.strip().lower() != 'one':
+                try:
+                    local_time = datetime.fromisoformat(move.event_time_local_text or '')
+                except ValueError:
+                    return False
+                if local_time.tzinfo is None or not move.source_event_id or not move.location_code:
+                    return False
             return (move.event_time is not None and move.event_time.tzinfo is not None
                     and move.container_reference == record.container
                     and same_port(shipment.destination_port, move.location_code or move.location))

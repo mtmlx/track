@@ -3,6 +3,24 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+def test_maersk_register_requires_occurrence_timezone_and_explicit_classifier():
+    from shipment_sync.carriers.maersk import _equipment_movement_records
+
+    event = dict(eventType="EQUIPMENT", equipmentReference="DRYU9944977",
+                 equipmentEventTypeCode="GTOT", emptyIndicatorCode="LADEN",
+                 eventClassifierCode="ACT", eventID="gate-1",
+                 eventDateTime="2026-11-17T10:01:00-06:00",
+                 transportCall={"UNLocationCode": "GTPRQ"})
+    record, = _equipment_movement_records([event], "BOOK", None)
+    move, = record.movements
+    assert (move.container_reference, move.source_event_id, move.equipment_load_state) == (
+        "DRYU9944977", "gate-1", "LADEN")
+    assert move.event_time.isoformat() == event["eventDateTime"]
+    record, = _equipment_movement_records(
+        [{**event, "eventDateTime": "2026-11-17T10:01:00"}], "BOOK", None)
+    assert not record.movements
+    assert not _equipment_movement_records([{**event, "eventClassifierCode": None}], "BOOK", None)
+
 from shipment_sync.container_progress import container_progress, progress_comment
 from shipment_sync.models import ContainerMovementRecord, MovementEvent, ShipmentRef, ShipmentStatus
 from shipment_sync.clickup_client import ClickUpClient
@@ -41,6 +59,27 @@ def test_staggered_gate_out_and_estimated_returns():
     assert '-06:00' in progress_comment(p)
     assert '2/2 ACTUAL' in progress_comment(p)
     assert '0/2 ACTUAL' in progress_comment(p)
+
+
+def test_maersk_publication_only_posts_once_and_never_updates_fields():
+    from types import SimpleNamespace
+    from shipment_sync.maersk_register import publish_maersk_register
+
+    sh, status = sample()
+    sh.shipping_line = "maersk"
+    comments = []
+    client = SimpleNamespace(
+        get_shipments_by_task_ids=lambda *a, **kw: [sh],
+        _fetch_recent_task_comment_texts=lambda *a, **kw: comments,
+        _post_comment=lambda task, text: comments.insert(0, text),
+    )
+    adapter = SimpleNamespace(fetch_container_progress_status=lambda shipment: status)
+    assert publish_maersk_register(client, sh, adapter) == "published"
+    assert publish_maersk_register(client, sh, adapter) == "unchanged"
+    assert len(comments) == 1
+    status.container_movements[0].movements[-1].event_state = "actual"
+    assert publish_maersk_register(client, sh, adapter) == "published"
+    assert "Empty returned: 1/2 ACTUAL" in comments[0]
 
 
 def test_one_return_then_all_returns():
