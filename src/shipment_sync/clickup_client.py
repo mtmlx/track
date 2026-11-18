@@ -958,8 +958,9 @@ class ClickUpClient:
 
         fallback_note = _msc_booking_fallback_note(shipment, status)
         progress = container_progress(shipment, status, now=now_utc)
-        if progress is not None and previous_snapshot_hash != snapshot_hash:
-            comment_text = (comment_text + '\n\n' if comment_text else '') + progress_comment(progress)
+        register = status.msc_gate_register or progress_comment(progress)
+        if register and (status.msc_gate_register or previous_snapshot_hash != snapshot_hash):
+            comment_text = (comment_text + '\n\n' if comment_text else '') + register
             plan_changed = True
         if fallback_note:
             comment_text = (comment_text + '\n\n' if comment_text else '') + fallback_note
@@ -991,12 +992,12 @@ class ClickUpClient:
             plan = self.plan_shipment_update(shipment, status)
             # Some production lists have no snapshot custom field. The saved
             # register fingerprint still prevents identical comments on reruns.
-            register = progress_comment(container_progress(shipment, status))
+            register = status.msc_gate_register or progress_comment(container_progress(shipment, status))
             if register and plan.comment_text and register in plan.comment_text:
                 marker = register.splitlines()[-1]
                 latest_register = next((text for text in self._fetch_recent_task_comment_texts(shipment.task_id, limit=25)
                                         if 'Container register fingerprint: ' in text), '')
-                if marker in latest_register:
+                if marker in latest_register.splitlines():
                     plan.comment_text = plan.comment_text.replace(register, '').strip() or None
                     plan.changed = bool(plan.task_status_update or any(
                         w.field_id != self.settings.cf_status_last_checked for w in plan.custom_field_updates))
