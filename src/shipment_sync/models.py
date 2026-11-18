@@ -51,6 +51,7 @@ class ShipmentStatus:
     validated_ocean_port: str | None = None
     all_containers_empty_returned: bool | None = None
     msc_booking_anchored_fallback: bool = False
+    msc_gate_register: str | None = None
     container_movements: list["ContainerMovementRecord"] = field(default_factory=list)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -415,7 +416,57 @@ def consolidate_browser_statuses(
         for move in status.recent_moves
     ) for status in statuses)
     selected.all_containers_empty_returned = all_empty_returned
+    selected.msc_gate_register = _date_only_gate_register(shipment, entries, now.date())
     return selected
+
+
+def _date_only_gate_register(shipment, entries, today):
+    """Count explicit historical MSC movement descriptions, not inferred times."""
+    expected = set(_container_references(shipment.container_no))
+    refs = [(capture_reference(capture) or "").upper() for capture, _ in entries]
+    if (len(expected) < 2 or len(expected) != shipment.expected_container_count
+            or set(refs) != expected or len(refs) != len(expected)):
+        return None
+    rows = []
+    for ref, (capture, status) in sorted(zip(refs, entries)):
+        if capture.task_id != shipment.task_id or set(_container_references(capture.capture)) != {ref}:
+            return None
+        if not same_port(shipment.destination_port, status.destination_port):
+            return None
+        events = _capture_events([line.strip() for line in capture.capture.splitlines() if line.strip()])
+        gates = {}
+        discharge = []
+        for event in events:
+            if not same_port(status.destination_port, event["Location"]):
+                continue
+            try:
+                day = datetime.strptime(event["Date"], "%d/%m/%Y").date()
+            except ValueError:
+                continue
+            if day > today:
+                continue
+            name = event["Description"].casefold()
+            if name == "import discharged from vessel":
+                discharge.append(day)
+            elif (name, event.get("EquipmentLoadState")) in {
+                    ("import to consignee", "LADEN"), ("empty received at cy", "EMPTY")}:
+                gates.setdefault(name, []).append(day)
+        rows.append((ref, *(max((day for day in gates.get(name, [])
+                                  if any(d <= day for d in discharge)), default=None)
+                            for name in ("import to consignee", "empty received at cy"))))
+    out = sum(row[1] is not None for row in rows)
+    returned = sum(row[2] is not None for row in rows)
+    if not (out or returned):
+        return None
+    lines = ["MSC container movement register (carrier dates only)",
+             f"Port gate-out: {out}/{len(rows)} confirmed",
+             f"Empty returned: {returned}/{len(rows)} confirmed",
+             "MSC did not supply times of day or timezones. Same-day event order is not verified.",
+             f"Carrier source: {MSC_TRACKING_URL}"]
+    lines.extend(f"{ref} | gate-out: {gate or 'NOT CONFIRMED'} | empty return: {ret or 'NOT CONFIRMED'}"
+                 for ref, gate, ret in rows)
+    fingerprint = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+    return "\n".join([*lines, "Container register fingerprint: " + fingerprint])
 
 
 def _canonical_datetime(value: datetime | None) -> str | None:
