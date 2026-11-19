@@ -294,6 +294,14 @@ def _run_sync(
                     "carrier": shipment.shipping_line,
                     "task_id": shipment.task_id, "outcome": outcome})), file=sys.stderr)
             if shipment.shipping_line == 'one':
+                from .one_departure_notice import publish_one_final_departure
+
+                try:
+                    notice = publish_one_final_departure(client, shipment, status)
+                except Exception as exc:
+                    notice = f"notice_error:{type(exc).__name__}"
+                print(terminal_safe_text(json.dumps({"event": "one_final_departure_notice",
+                    "task_id": shipment.task_id, "outcome": notice})), file=sys.stderr)
                 print(terminal_safe_text(json.dumps({'event': 'one_tracking_writeback', 'task_id': shipment.task_id,
                                   'outcome': 'updated' if write_result.changed else 'unchanged'})), file=sys.stderr)
             if write_result.changed:
