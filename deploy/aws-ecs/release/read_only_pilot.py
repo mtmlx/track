@@ -1,10 +1,14 @@
 import json
+import hashlib
+from pathlib import Path
 import signal
 from urllib.parse import urlparse
 import requests
 from shipment_sync.config import Settings
 from shipment_sync.clickup_client import ClickUpClient
 from shipment_sync.carriers.registry import build_carrier_registry
+from shipment_sync import movement_archive
+from shipment_sync.scheduled_movement_archive import read_only_scope
 
 signal.alarm(240)
 original_send = requests.Session.send
@@ -19,6 +23,14 @@ def guarded_send(self, request, **kwargs):
     return original_send(self, request, **kwargs)
 requests.Session.send = guarded_send
 client = ClickUpClient(Settings.from_env())
+lists, line = read_only_scope()
+if lists:
+    publisher = movement_archive.MovementArchivePublisher.from_env()
+    assert publisher is not None
+    assert hashlib.sha256(Path(movement_archive.__file__).read_bytes()).hexdigest() == publisher.release
+    archive_lists = {str(entry['binding']['list_id']) for entry in publisher.catalog()['tasks'].values()}
+    assert lists <= archive_lists
+    print(json.dumps({'movement_publisher':'verified', 'publisher_carrier':line, 'operational_writes':0}))
 shipments = client.list_shipments()
 if not shipments:
     print(json.dumps({'result':'inconclusive','reason':'no candidate shipments',**counts}))

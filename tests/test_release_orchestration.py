@@ -110,3 +110,22 @@ def test_task_release_versions_maritime_scope_without_changing_credentials():
     ]
     assert container['secrets'] == [{'name':'CLICKUP_API_TOKEN','valueFrom':'keep-token'}]
     assert baseline == before
+
+
+def test_release_binds_read_only_archive_to_supported_carrier(monkeypatch):
+    monkeypatch.setenv('TRACK_MOVEMENT_READ_ONLY_LIST_IDS', '1000')
+    baseline = {'family': 'track-trace-one', 'containerDefinitions': [{
+        'name': 'worker', 'image': 'old',
+        'environment': [{'name': 'MOVEMENT_ARCHIVE_ENABLED', 'value': 'true'}],
+    }]}
+    shape = SimpleNamespace(members={'family': None, 'containerDefinitions': None})
+    client = SimpleNamespace(meta=SimpleNamespace(service_model=SimpleNamespace(
+        operation_model=lambda _: SimpleNamespace(input_shape=shape))))
+    result = release.task_request(client, baseline, 'new')
+    env = {v['name']: v['value'] for v in result['containerDefinitions'][0]['environment']}
+    assert env['MOVEMENT_ARCHIVE_READ_ONLY_LIST_IDS'] == '1000'
+    assert env['MOVEMENT_ARCHIVE_SCHEDULED_CARRIER'] == 'one'
+    baseline['family'] = 'track-trace-wan-hai'
+    result = release.task_request(client, baseline, 'new')
+    assert all(not v['name'].startswith('MOVEMENT_ARCHIVE_READ_ONLY')
+               for v in result['containerDefinitions'][0]['environment'])

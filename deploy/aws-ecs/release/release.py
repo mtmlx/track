@@ -17,6 +17,7 @@ CLUSTER = 'track-trace-prod'
 REPO = 'track-trace'
 CARRIERS = ('maersk', 'wan-hai', 'cma-cgm', 'msc', 'one')
 RUNTIME_CONFIG = {'CLICKUP_DISCOVERY_LIST_NAME_INCLUDE': 'shipment,maritimo'}
+ARCHIVE_CARRIERS = {'track-trace-maersk': 'maersk', 'track-trace-cma-cgm': 'cma-cgm', 'track-trace-one': 'one'}
 ROOT = Path(__file__).resolve().parent
 EVIDENCE = Path('release-evidence')
 
@@ -44,10 +45,20 @@ def task_request(client, baseline, image, family=None):
         raise RuntimeError('Unexpected multi-container task: manual review required')
     result['containerDefinitions'][0]['image'] = image
     container = result['containerDefinitions'][0]
+    runtime_config = RUNTIME_CONFIG.copy()
+    movement_lists = os.environ.get('TRACK_MOVEMENT_READ_ONLY_LIST_IDS', '').strip()
+    archive_carrier = ARCHIVE_CARRIERS.get(baseline['family'])
+    if movement_lists and archive_carrier:
+        if not re.fullmatch(r'[0-9]+(?: +[0-9]+)*', movement_lists):
+            raise RuntimeError('Invalid read-only archive list scope')
+        if {'name': 'MOVEMENT_ARCHIVE_ENABLED', 'value': 'true'} not in container['environment']:
+            raise RuntimeError('Restored movement publisher must be enabled in the selected schedule')
+        runtime_config.update(MOVEMENT_ARCHIVE_READ_ONLY_LIST_IDS=movement_lists,
+                              MOVEMENT_ARCHIVE_SCHEDULED_CARRIER=archive_carrier)
     # Version the reviewed non-secret scope with the release, not shared credentials.
-    container['environment'] = [v for v in container.get('environment', []) if v['name'] not in RUNTIME_CONFIG]
-    container['environment'] += [{'name':k, 'value':v} for k,v in RUNTIME_CONFIG.items()]
-    container['secrets'] = [v for v in container.get('secrets', []) if v['name'] not in RUNTIME_CONFIG]
+    container['environment'] = [v for v in container.get('environment', []) if v['name'] not in runtime_config]
+    container['environment'] += [{'name':k, 'value':v} for k,v in runtime_config.items()]
+    container['secrets'] = [v for v in container.get('secrets', []) if v['name'] not in runtime_config]
     if family:
         result['family'] = family
     return result
