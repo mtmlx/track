@@ -26,6 +26,7 @@ from shipment_sync.carriers.common import (
 )
 from shipment_sync.models import ContainerMovementRecord, MovementEvent, ShipmentRef, ShipmentStatus
 from shipment_sync.destination import same_port
+from shipment_sync.movement_archive import native_batch
 from shipment_sync.playwright_runner import configured_browser_channel, run_sync_playwright
 
 
@@ -183,6 +184,8 @@ class CmaCgmAdapter(CarrierAdapter):
             )
             if set(status.discovered_containers) != {reference} or not status.recent_moves:
                 raise ValueError(f"CMA returned missing or conflicting container evidence for {reference}")
+            status.movement_evidence = [native_batch(list(fetched.events), fetched.source_url,
+                request_container=reference)]
             statuses.append(_bind_destination(status, shipment.destination_port))
         return _consolidate_containers(shipment, references, statuses)
 
@@ -209,6 +212,8 @@ class CmaCgmAdapter(CarrierAdapter):
             if scoped_units != {reference} or not status.recent_moves:
                 raise ValueError(f'CMA booking evidence incomplete for container {reference}')
             status.discovered_containers = [reference]
+            status.movement_evidence = [native_batch(scoped, fetched.source_url,
+                request_booking=shipment.booking_no, request_container=reference)]
             statuses.append(_bind_destination(status, shipment.destination_port))
         return _consolidate_containers(shipment, references, statuses)
 
@@ -855,6 +860,7 @@ def _consolidate_containers(shipment: ShipmentRef, references: list[str], status
                    ],
                    eta_time=eta.eta_time if eta else None, eta_local_text=eta.eta_local_text if eta else None,
                    vessel_voyage=vessel, final_vessel_voyage=vessel,
+                   movement_evidence=[batch for item in statuses for batch in item.movement_evidence],
                    movement_details=f"Validated CMA evidence for all {len(references)} shipment containers")
 
 

@@ -26,6 +26,7 @@ from shipment_sync.carriers.common import (
 )
 from shipment_sync.models import ContainerMovementRecord, MovementEvent, ShipmentRef, ShipmentStatus
 from shipment_sync.destination import same_port
+from shipment_sync.movement_archive import native_batch
 from shipment_sync.playwright_runner import run_sync_playwright
 
 
@@ -155,6 +156,24 @@ class MaerskAdapter(CarrierAdapter):
                 return events, self.api_url
         return [], self.api_url
 
+    def capture_booking_movement_evidence(self, shipment: ShipmentRef, status: ShipmentStatus) -> bool:
+        """Archive-only full booking proof, using the existing official reader.
+
+        Caller requires explicit customer catalog + optional flag. This never
+        replaces the normal first-container status, ETA or field write plan.
+        """
+        credentials = self._credentials_for(shipment)
+        if (self.api_mode != 'events' or not self.api_url or not credentials.is_configured
+                or not shipment.booking_no or not shipment.container_no):
+            return False
+        expected = set(_split_container_references(shipment.container_no))
+        events = self._fetch_all_events(shipment.booking_no, 'booking', self._build_events_api_headers(credentials))
+        observed = set(extract_container_numbers({'events': events}))
+        if not expected or observed != expected:
+            return False
+        status.movement_evidence.append(native_batch(events, self.api_url, request_booking=shipment.booking_no))
+        return True
+
     def _fetch_status_for_reference(
         self,
         reference: str,
@@ -170,6 +189,11 @@ class MaerskAdapter(CarrierAdapter):
 
         if events:
             status = _status_from_events(events, source, source_url=source_url)
+            if source == f'maersk-events-api:{self.api_url}':
+                status.movement_evidence = [native_batch(events, self.api_url,
+                    request_booking=reference if ref_type == 'booking' else None,
+                    request_container=reference if ref_type == 'container' else None,
+                    complete=self.fetch_all_events)]
             status.discovered_containers = discovered_containers
             public_vessel_voyage = payload.get("public_vessel_voyage")
             if isinstance(public_vessel_voyage, str) and public_vessel_voyage.strip():

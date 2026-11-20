@@ -53,6 +53,8 @@ class ShipmentStatus:
     msc_booking_anchored_fallback: bool = False
     msc_gate_register: str | None = None
     container_movements: list["ContainerMovementRecord"] = field(default_factory=list)
+    # Existing provider responses only; excluded from operational field plans.
+    movement_evidence: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

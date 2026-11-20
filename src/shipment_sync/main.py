@@ -9,6 +9,7 @@ from shipment_sync.clickup_client import ClickUpClient
 from shipment_sync.config import Settings
 from shipment_sync.date_utils import format_port_local_time
 from shipment_sync.models import ShipmentRef, ShipmentUpdatePlan
+from shipment_sync.scheduled_movement_archive import publish_read_only, read_only_scope
 from shipment_sync.sync import run_sync
 from shipment_sync.terminal import terminal_safe_text
 
@@ -61,6 +62,17 @@ def main() -> None:
             _preview_updates(client, shipments)
             return
 
+        read_only_lists, carrier = read_only_scope()
+        if read_only_lists:
+            # Keep these lists outside the existing ClickUp writer, including
+            # when the archive itself is unavailable or incomplete.
+            shipments = [item for item in shipments if str(item.list_id) not in read_only_lists]
+            if not (args.task_id or args.booking or args.container):
+                try:
+                    publish_read_only(client.get_shipments_by_task_ids, read_only_lists, carrier,
+                                      settings.shipment_terminal_statuses)
+                except Exception as exc:
+                    print(f"Scheduled movement archive unavailable ({type(exc).__name__}).", file=sys.stderr)
         stats = run_sync(client, shipments=shipments)
         updated_items = stats.updated_items
         skipped = stats.skipped

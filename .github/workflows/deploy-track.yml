@@ -21,6 +21,8 @@ jobs:
       - name: Install application and test dependencies
         run: python -m pip install . boto3==1.43.61 pytest==9.1.1
       - run: python -m pytest tests/test_release_orchestration.py -q
+      - name: Verify read-only carrier movement publication
+        run: PYTHONPATH=src python -m pytest tests/test_movement_archive.py tests/test_scheduled_movement_archive.py -q
       - name: Validate per-container timestamps and completion counters
         run: PYTHONPATH=src python -m pytest tests/test_container_progress.py tests/test_wan_hai_reviewed.py -q
       - name: Preserve reviewed CloudWatch group and stream permissions
@@ -63,6 +65,7 @@ jobs:
         run: python deploy/aws-ecs/release/release.py
         env:
           RELEASE_SHA: ${{ github.sha }}
+          TRACK_MOVEMENT_READ_ONLY_LIST_IDS: ${{ secrets.TRACK_MOVEMENT_READ_ONLY_LIST_IDS }}
       - name: Preserve release evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
