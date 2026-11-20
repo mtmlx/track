@@ -69,7 +69,8 @@ def main() -> None:
             shipments = [item for item in shipments if str(item.list_id) not in read_only_lists]
             if not (args.task_id or args.booking or args.container):
                 try:
-                    publish_read_only(client.get_shipments_by_task_ids, read_only_lists, carrier)
+                    publish_read_only(client.get_shipments_by_task_ids, read_only_lists, carrier,
+                                      settings.shipment_terminal_statuses)
                 except Exception as exc:
                     print(f"Scheduled movement archive unavailable ({type(exc).__name__}).", file=sys.stderr)
         stats = run_sync(client, shipments=shipments)

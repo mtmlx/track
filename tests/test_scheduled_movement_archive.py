@@ -25,7 +25,7 @@ def test_scheduled_archive_reads_only_approved_list_and_carrier(monkeypatch, cap
     monkeypatch.setattr(scheduled, '_fetch_carrier_status', fetch)
     source_read = Mock(return_value=[ship])
 
-    scheduled.publish_read_only(source_read, {'1000'}, 'one')
+    scheduled.publish_read_only(source_read, {'1000'}, 'one', ('closed',))
 
     source_read.assert_called_once_with(['task1'], allowed_list_ids={'1000'})
     fetch.assert_called_once_with('adapter', ship)
@@ -39,10 +39,14 @@ def test_scheduled_archive_reads_only_approved_list_and_carrier(monkeypatch, cap
     publisher._binding.side_effect = ValueError('drifted shipment')
     fetch.reset_mock()
     publisher.publish.reset_mock()
-    scheduled.publish_read_only(source_read, {'1000'}, 'one')
+    scheduled.publish_read_only(source_read, {'1000'}, 'one', ('closed',))
     fetch.assert_not_called()
     publisher.publish.assert_not_called()
     assert json.loads(capsys.readouterr().out)['state'] == 'READ_GAP'
+    ship.current_task_status = 'closed'
+    scheduled.publish_read_only(source_read, {'1000'}, 'one', ('closed',))
+    fetch.assert_not_called()
+    assert json.loads(capsys.readouterr().out)['state'] == 'CLOSED_OR_MISSING'
 
 
 def test_read_only_list_stays_out_of_sync_when_archive_unavailable(monkeypatch):
@@ -50,7 +54,7 @@ def test_read_only_list_stays_out_of_sync_when_archive_unavailable(monkeypatch):
     monkeypatch.setenv('MOVEMENT_ARCHIVE_SCHEDULED_CARRIER', 'one')
     monkeypatch.setattr('sys.argv', ['shipment-sync'])
     monkeypatch.setattr(main, 'load_dotenv', lambda: None)
-    settings = SimpleNamespace(eta_only_mode=False)
+    settings = SimpleNamespace(eta_only_mode=False, shipment_terminal_statuses=('closed',))
     monkeypatch.setattr(main.Settings, 'from_env', lambda: settings)
     protected, other = [ShipmentRef(t, 'Test', 'one', 'BOOK', 'ABCD1234567', l)
                         for t, l in (('a', '1000'), ('b', '1001'))]
@@ -66,5 +70,5 @@ def test_read_only_list_stays_out_of_sync_when_archive_unavailable(monkeypatch):
 
     main.main()
 
-    archive.assert_called_once_with(client.get_shipments_by_task_ids, {'1000'}, 'one')
+    archive.assert_called_once_with(client.get_shipments_by_task_ids, {'1000'}, 'one', ('closed',))
     sync.assert_called_once_with(client, shipments=[other])

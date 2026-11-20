@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from shipment_sync.carriers.registry import build_carrier_registry
 from shipment_sync.movement_archive import MovementArchivePublisher, carrier
 from shipment_sync.one_write_holds import write_hold_reason
-from shipment_sync.sync import _fetch_carrier_status
+from shipment_sync.sync import _fetch_carrier_status, _terminal_shipment_status
 
 
 def read_only_scope():
@@ -23,7 +23,7 @@ def read_only_scope():
     return set(lists), carrier(line)
 
 
-def publish_read_only(read_shipments, list_ids, line):
+def publish_read_only(read_shipments, list_ids, line, terminal_statuses):
     """Only ClickUp GETs and native carrier reads precede archive publication."""
     publisher = MovementArchivePublisher.from_env()
     if publisher is None:
@@ -45,7 +45,9 @@ def publish_read_only(read_shipments, list_ids, line):
                 shipment, = matches
                 if shipment.task_id != task_id or carrier(shipment.shipping_line) != line:
                     raise ValueError('Current shipment no longer matches the catalog')
-                if write_hold_reason(shipment):
+                if _terminal_shipment_status(shipment.current_task_status, terminal_statuses):
+                    result['state'] = 'CLOSED_OR_MISSING'
+                elif write_hold_reason(shipment):
                     result['state'] = 'HELD'
                 else:
                     allocation = SimpleNamespace(container_booking_map=binding['container_bookings'])
