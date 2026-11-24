@@ -66,6 +66,7 @@ jobs:
         env:
           RELEASE_SHA: ${{ github.sha }}
           TRACK_MOVEMENT_READ_ONLY_LIST_IDS: ${{ secrets.TRACK_MOVEMENT_READ_ONLY_LIST_IDS }}
+          TRACK_ONE_ARCHIVE_RETURN_WRITE_TASK_IDS: ${{ vars.TRACK_ONE_ARCHIVE_RETURN_WRITE_TASK_IDS }}
       - name: Preserve release evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

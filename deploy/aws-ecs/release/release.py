@@ -48,6 +48,12 @@ def task_request(client, baseline, image, family=None):
     runtime_config = RUNTIME_CONFIG.copy()
     movement_lists = os.environ.get('TRACK_MOVEMENT_READ_ONLY_LIST_IDS', '').strip()
     archive_carrier = ARCHIVE_CARRIERS.get(baseline['family'])
+    if archive_carrier == 'one':
+        return_ids = os.environ.get('TRACK_ONE_ARCHIVE_RETURN_WRITE_TASK_IDS', '').strip()
+        if return_ids and (not movement_lists or not re.fullmatch(r'[a-z0-9]+(?: +[a-z0-9]+)*', return_ids)
+                           or '86e345fnw' in return_ids.split()):
+            raise RuntimeError('Invalid ONE archive return write scope')
+        runtime_config['ONE_ARCHIVE_RETURN_WRITE_TASK_IDS'] = return_ids
     if movement_lists and archive_carrier:
         if not re.fullmatch(r'[0-9]+(?: +[0-9]+)*', movement_lists):
             raise RuntimeError('Invalid read-only archive list scope')
