@@ -698,6 +698,28 @@ def test_multi_empty_return_requires_every_container_after_discharge(monkeypatch
     assert not any(w.field_id == 'gtin-empty-field' for w in plan.custom_field_updates)
 
 
+@pytest.mark.parametrize('fifth,closes', [(None, False), ('EST', False), ('ACT', True)])
+def test_scoped_delivery_close_requires_five_actual_returns(monkeypatch, fifth, closes):
+    references = ['ONEU2154315', 'CAAU2475597', 'FFAU5982433', 'TCLU9573423', 'TXGU8973620']
+    ship = shipment(current_task_status='en ruta a almacén')
+    ship.container_no = ', '.join(references)
+    ship.expected_container_count = 5
+    rows = {}
+    for i, ref in enumerate(references):
+        moves = [event(f'{i}-disc', 'DISC', 'GTPRQ', days=-5)]
+        classifier = 'ACT' if i < 4 else fifth
+        if classifier:
+            moves.append(event(f'{i}-return', 'GTIN', 'GTPRQ', classifier=classifier, empty='EMPTY'))
+        rows[ref] = [{**move, 'equipmentReference': ref} for move in moves]
+    status = multi_client(monkeypatch, rows).fetch_status(ship)
+    clickup = ClickUpClient(_settings(clickup_use_task_status=True, eta_only_mode=False))
+    writes = []
+    monkeypatch.setattr(clickup, 'get_shipments_by_task_ids', lambda *a, **kw: [ship])
+    monkeypatch.setattr(clickup, '_set_task_status', lambda *args: writes.append(args))
+    assert clickup.close_archived_one_return(ship, status) is closes
+    assert writes == ([(ship.task_id, 'Vacío devuelto')] if closes else [])
+
+
 @pytest.mark.parametrize('code,port,empty,field', [
     ('GTIN','TWKEL','EMPTY','gtin-full-field'),
     ('GTOT','TWKEL','LADEN','gtot-empty-field'),

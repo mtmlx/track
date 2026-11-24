@@ -974,6 +974,35 @@ class ClickUpClient:
             comment_text=comment_text,
         )
 
+    def close_archived_one_return(self, shipment: ShipmentRef, status: ShipmentStatus) -> bool:
+        """Write only the approved terminal status, using fresh ClickUp identity."""
+        if ((shipment.shipping_line or '').lower() != 'one'
+                or self.settings.eta_only_mode
+                or write_hold_reason(shipment)
+                or (shipment.expected_container_count or 0) < 2
+                or status.all_containers_empty_returned is not True):
+            return False
+        matches = self.get_shipments_by_task_ids(
+            [shipment.task_id], allowed_list_ids={shipment.list_id})
+        if len(matches) != 1:
+            return False
+        current = matches[0]
+        identity = lambda ref: (ref.task_id, ref.list_id, ref.shipping_line, ref.booking_no,
+                                ref.master_bl_no, ref.container_no, ref.expected_container_count,
+                                ref.destination_port, ref.current_task_status)
+        if write_hold_reason(current) or identity(current) != identity(shipment):
+            return False
+        steps = _workflow_status_by_step(self.settings, current)
+        if _workflow_step_for_status(steps, current.current_task_status or '') not in {
+            'en_route_warehouse', 'in_warehouse',
+        }:
+            return False
+        plan = self.plan_shipment_update(current, status)
+        if not plan.task_status_update or plan.task_status_update != steps.get('empty_returned'):
+            return False
+        self._set_task_status(current.task_id, plan.task_status_update)
+        return True
+
     def update_shipment_status(self, shipment: ShipmentRef, status: ShipmentStatus) -> ShipmentWriteResult:
         hold = write_hold_reason(shipment)
         if hold:

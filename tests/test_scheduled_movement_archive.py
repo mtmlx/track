@@ -36,6 +36,16 @@ def test_scheduled_archive_reads_only_approved_list_and_carrier(monkeypatch, cap
         'state': 'ARCHIVED', 'event_count': 1,
     }
 
+    writer = Mock(return_value=True)
+    scheduled.publish_read_only(source_read, {'1000'}, 'one', ('closed',), return_writer=writer)
+    writer.assert_not_called()
+    capsys.readouterr()
+    monkeypatch.setenv('ONE_ARCHIVE_RETURN_WRITE_TASK_IDS', 'task1')
+    publisher.publish.return_value = {'state': 'ALREADY_ARCHIVED'}
+    scheduled.publish_read_only(source_read, {'1000'}, 'one', ('closed',), return_writer=writer)
+    writer.assert_called_once_with(ship, fetch.return_value)
+    assert json.loads(capsys.readouterr().out)['clickup_writes'] == 1
+
     publisher._binding.side_effect = ValueError('drifted shipment')
     fetch.reset_mock()
     publisher.publish.reset_mock()
@@ -70,5 +80,6 @@ def test_read_only_list_stays_out_of_sync_when_archive_unavailable(monkeypatch):
 
     main.main()
 
-    archive.assert_called_once_with(client.get_shipments_by_task_ids, {'1000'}, 'one', ('closed',))
+    archive.assert_called_once_with(client.get_shipments_by_task_ids, {'1000'}, 'one', ('closed',),
+                                    return_writer=client.close_archived_one_return)
     sync.assert_called_once_with(client, shipments=[other])

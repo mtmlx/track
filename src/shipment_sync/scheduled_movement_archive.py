@@ -23,8 +23,9 @@ def read_only_scope():
     return set(lists), carrier(line)
 
 
-def publish_read_only(read_shipments, list_ids, line, terminal_statuses):
-    """Only ClickUp GETs and native carrier reads precede archive publication."""
+def publish_read_only(read_shipments, list_ids, line, terminal_statuses, *, return_writer=None):
+    """Archive movements; optionally close explicitly opted-in ONE shipments."""
+    return_ids = set(os.getenv('ONE_ARCHIVE_RETURN_WRITE_TASK_IDS', '').split())
     publisher = MovementArchivePublisher.from_env()
     if publisher is None:
         raise ValueError('Scheduled movement archive must be enabled')
@@ -59,6 +60,9 @@ def publish_read_only(read_shipments, list_ids, line, terminal_statuses):
                     if status.movement_evidence:
                         saved = publisher.publish(shipment, status, publisher_origin='SCHEDULED_READ_ONLY_PROVIDER_RESPONSE')
                         result.update({key: saved[key] for key in ('state', 'event_count') if key in saved})
+                        if (saved.get('state') in {'ARCHIVED', 'ALREADY_ARCHIVED'} and line == 'one'
+                                and task_id in return_ids and return_writer is not None):
+                            result['clickup_writes'] = int(return_writer(shipment, status))
                     else:
                         result['state'] = 'NATIVE_MOVEMENT_UNAVAILABLE'
         except Exception as exc:
